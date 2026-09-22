@@ -228,3 +228,48 @@ async def cmd_unban(message: Message, bot: Bot):
         await message.reply(f"✅ Пользователь с ID <code>{user_id}</code> разбанен.", parse_mode="HTML")
     except Exception as e:
         await message.reply(f"❌ Не удалось разбанить пользователя: {e}")
+
+
+@router.message(Command("kick"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_kick(message: Message, bot: Bot):
+    if not await is_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("⚠️ Ответьте на сообщение участника, которого хотите выгнать: <code>/kick</code>")
+        return
+
+    target_user = message.reply_to_message.from_user
+    if await is_admin(bot, message.chat.id, target_user.id):
+        await message.reply("❌ Нельзя выгнать администратора.")
+        return
+
+    try:
+        await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_user.id)
+        await bot.unban_chat_member(chat_id=message.chat.id, user_id=target_user.id)
+        user_mention = target_user.mention_html()
+        await message.reply(f"👢 Пользователь {user_mention} выгнан из группы.", parse_mode="HTML")
+    except Exception as e:
+        await message.reply(f"❌ Не удалось выгнать пользователя: {e}")
+
+
+@router.message(Command("del"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_del(message: Message, bot: Bot):
+    if not await is_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    if message.reply_to_message:
+        await delete_message_safe(bot, message.chat.id, message.reply_to_message.message_id)
+    await delete_message_safe(bot, message.chat.id, message.message_id)
+
+
+@router.message(Command("rules"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_rules(message: Message):
+    rules_text = (
+        "📜 <b>Правила нашего чата:</b>\n\n"
+        "1. 🔗 <b>Никаких ссылок</b> (на сайты, каналы, ботов, чаты).\n"
+        "2. 🤬 <b>Уважайте участников</b> — нецензурная лексика и оскорбления запрещены.\n"
+        "3. 🚫 <b>Без спама</b> — флуд, капслок, реклама и заработки немедленно удаляются.\n\n"
+        "<i>За нарушения бот автоматически выдает мут!</i>"
+    )
+    await message.reply(rules_text, parse_mode="HTML")

@@ -90,11 +90,33 @@ function hasProfanity(text) {
 }
 
 // 3. Spam Check
+const SPAM_PHRASES = [
+  /пассивн(?:ый|ого|ому|ом|ым)\s+доход/i,
+  /заработ(?:ок|ать|ай|ывай)\s+(?:в\s+день|от|в\s+лс|онлайн)/i,
+  /пиши(?:те)?\s+в\s+лс/i,
+  /слив\s+приват/i,
+  /сигнал[ыов]+\s+по\s+крипт/i,
+  /инвестици[иях]\s+от/i,
+  /переходи\s+по\s+ссылке/i,
+  /легкие\s+деньги/i,
+  /отдам\s+даром/i,
+  /дарю\s+крипт/i
+];
+
 function hasSpam(msg) {
   const text = msg.text || msg.caption || "";
+  
+  // Рекламные пересылки из каналов
   if (msg.forward_origin?.type === "channel" || msg.forward_from_chat?.type === "channel") {
     return "Реклама из каналов";
   }
+
+  // Стоп-фразы спамеров и мошенников
+  for (let reg of SPAM_PHRASES) {
+    if (reg.test(text)) return "Рекламный спам / мошенничество";
+  }
+
+  // CAPS LOCK
   const letters = text.replace(/[^a-zA-Zа-яёА-ЯЁ]/g, '');
   if (letters.length >= 12) {
     const upper = letters.replace(/[^A-ZА-ЯЁ]/g, '').length;
@@ -102,7 +124,14 @@ function hasSpam(msg) {
       return "Злоупотребление CAPS LOCK";
     }
   }
+
+  // Повторяющиеся символы (аааааа...)
   if (/(.)\1{25,}/.test(text)) return "Спам повторяющимися символами";
+
+  // Массовые упоминания (@user1 @user2 @user3...)
+  const mentions = (msg.entities || []).filter(e => e.type === "mention" || e.type === "text_mention");
+  if (mentions.length >= 4) return "Массовое упоминание пользователей";
+
   return null;
 }
 
@@ -157,11 +186,14 @@ export default {
       const commands = [
         { command: "start", description: "Запустить бота и получить информацию" },
         { command: "help", description: "Справка по командам модератора" },
-        { command: "mute", description: "Замутить пользователя (ответом: /mute 30m / 2h)" },
-        { command: "unmute", description: "Снять мут с пользователя (ответом на сообщение)" },
-        { command: "ban", description: "Забанить нарушителя в чате (ответом)" },
+        { command: "rules", description: "Показать правила чата" },
+        { command: "mute", description: "Замутить (ответом: /mute 30m / 2h / 1d)" },
+        { command: "unmute", description: "Снять мут с пользователя (ответом)" },
+        { command: "kick", description: "Выгнать пользователя из группы (ответом)" },
+        { command: "ban", description: "Навсегда забанить нарушителя (ответом)" },
         { command: "unban", description: "Разбанить пользователя по ID: /unban <ID>" },
-        { command: "warn", description: "Выдать предупреждение нарушителю (ответом)" }
+        { command: "warn", description: "Выдать предупреждение (ответом)" },
+        { command: "del", description: "Быстро удалить сообщение (ответом)" }
       ];
       const res = await tgApi(token, "setMyCommands", { commands });
       const data = await res.json();
@@ -177,11 +209,22 @@ export default {
     try {
       const update = await request.json();
       const msg = update.message;
-      if (!msg || !msg.chat || !msg.from) {
+      if (!msg || !msg.chat) {
         return new Response("OK");
       }
 
       const chatId = msg.chat.id;
+
+      // Авто-удаление служебных сообщений "Пользователь вступил в группу / покинул группу"
+      if (msg.new_chat_members || msg.left_chat_member) {
+        await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        return new Response("OK");
+      }
+
+      if (!msg.from) {
+        return new Response("OK");
+      }
+
       const userId = msg.from.id;
 
       // Ответ на /start и сообщения в ЛС
@@ -234,11 +277,59 @@ export default {
             chat_id: chatId,
             text: "🛡️ <b>Бот-модератор активен!</b>\n\n" +
                   "Команды администратора (ответом на сообщение нарушителя):\n" +
+                  "• <code>/rules</code> — показать правила чата\n" +
                   "• <code>/mute 30m / 2h / 1d</code> — замутить пользователя\n" +
                   "• <code>/unmute</code> — снять мут\n" +
-                  "• <code>/ban</code> — забанить\n" +
+                  "• <code>/kick</code> — выгнать пользователя из группы\n" +
+                  "• <code>/ban</code> — забанить навсегда\n" +
                   "• <code>/warn [причина]</code> — выдать предупреждение\n" +
+                  "• <code>/del</code> — быстро удалить сообщение\n" +
                   "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя",
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /rules
+        if (cmd === "/rules") {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "📜 <b>Правила нашего чата:</b>\n\n" +
+                  "1. 🔗 <b>Никаких ссылок</b> (на сайты, каналы, ботов, чаты).\n" +
+                  "2. 🤬 <b>Уважайте участников</b> — нецензурная лексика и оскорбления запрещены.\n" +
+                  "3. 🚫 <b>Без спама</b> — флуд, капслок, реклама и заработки немедленно удаляются.\n\n" +
+                  "<i>За нарушения бот автоматически выдает мут!</i>",
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /del (быстрое удаление сообщения)
+        if (cmd === "/del") {
+          if (msg.reply_to_message) {
+            await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.reply_to_message.message_id });
+          }
+          await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+          return new Response("OK");
+        }
+
+        // Команда /kick (выгнать из чата)
+        if (cmd === "/kick") {
+          if (!msg.reply_to_message || !msg.reply_to_message.from) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Ответьте на сообщение участника, которого хотите выгнать: <code>/kick</code>",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          const targetUser = msg.reply_to_message.from;
+          await tgApi(token, "banChatMember", { chat_id: chatId, user_id: targetUser.id });
+          await tgApi(token, "unbanChatMember", { chat_id: chatId, user_id: targetUser.id });
+          const mention = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `👢 Пользователь ${mention} выгнан из группы.`,
             parse_mode: "HTML"
           });
           return new Response("OK");
