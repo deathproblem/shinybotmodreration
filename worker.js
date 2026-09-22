@@ -152,14 +152,48 @@ export default {
     try {
       const update = await request.json();
       const msg = update.message;
-      if (!msg || !msg.chat || msg.chat.type === "private" || !msg.from) {
+      if (!msg || !msg.chat || !msg.from) {
         return new Response("OK");
       }
 
       const chatId = msg.chat.id;
       const userId = msg.from.id;
 
+      // Ответ на /start и сообщения в ЛС
+      if (msg.chat.type === "private") {
+        const welcomeText =
+          "🛡️ <b>Привет! Я бот-модератор для групп Telegram.</b>\n\n" +
+          "<b>Что я делаю в группе автоматически:</b>\n" +
+          "• 🔗 <b>Блокирую любые ссылки</b> (сайты, t.me, скрытые и замаскированные ссылки)\n" +
+          "• 🤬 <b>Удаляю маты</b> (с защитой от обхода латиницей, точками, пробелами и цифрами)\n" +
+          "• 🚫 <b>Блокирую спам</b> (CAPS LOCK, спам символами, рекламные пересылки из каналов)\n\n" +
+          "<b>Как меня запустить:</b>\n" +
+          "1. Нажмите кнопку ниже или добавьте меня в группу.\n" +
+          "2. Назначьте меня <b>Администратором</b> с правами <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.\n\n" +
+          "После этого чат будет под надежной защитой 24/7!";
+
+        await tgApi(token, "sendMessage", {
+          chat_id: chatId,
+          text: welcomeText,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "➕ Добавить бота в группу", url: "https://t.me/shinymoderation?startgroup=true" }]
+            ]
+          }
+        });
+        return new Response("OK");
+      }
+
+      // Если в группе пишет администратор — игнорируем
       if (await isAdmin(token, chatId, userId)) {
+        if (msg.text === "/start" || msg.text === "/help") {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "🛡️ <b>Бот-модератор активен и защищает этот чат!</b>\nВсе ссылки, мат и спам от участников удаляются автоматически.",
+            parse_mode: "HTML"
+          });
+        }
         return new Response("OK");
       }
 
