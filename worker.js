@@ -153,6 +153,23 @@ export default {
       });
     }
 
+    if (url.pathname === "/set-commands") {
+      const commands = [
+        { command: "start", description: "Запустить бота и получить информацию" },
+        { command: "help", description: "Справка по командам модератора" },
+        { command: "mute", description: "Замутить пользователя (ответом: /mute 30m / 2h)" },
+        { command: "unmute", description: "Снять мут с пользователя (ответом на сообщение)" },
+        { command: "ban", description: "Забанить нарушителя в чате (ответом)" },
+        { command: "unban", description: "Разбанить пользователя по ID: /unban <ID>" },
+        { command: "warn", description: "Выдать предупреждение нарушителю (ответом)" }
+      ];
+      const res = await tgApi(token, "setMyCommands", { commands });
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (request.method !== "POST") {
       return new Response("Telegram Moderator Bot is running on Cloudflare Workers!\nVisit /set-webhook to link bot.", { status: 200 });
     }
@@ -183,10 +200,15 @@ export default {
           "• 🔗 <b>Блокирую любые ссылки</b> (сайты, t.me, скрытые и замаскированные ссылки)\n" +
           "• 🤬 <b>Удаляю маты</b> (с защитой от обхода латиницей, точками, пробелами и цифрами)\n" +
           "• 🚫 <b>Блокирую спам</b> (CAPS LOCK, спам символами, рекламные пересылки из каналов)\n\n" +
+          "<b>Команды администраторов (в группе):</b>\n" +
+          "• <code>/mute [время]</code> — замутить (ответом на сообщение: <code>/mute 30m</code>, <code>/mute 2h</code>, <code>/mute 1d</code>)\n" +
+          "• <code>/unmute</code> — снять мут (ответом на сообщение)\n" +
+          "• <code>/ban</code> — забанить нарушителя (ответом на сообщение)\n" +
+          "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя\n" +
+          "• <code>/warn [причина]</code> — выдать предупреждение\n\n" +
           "<b>Как меня запустить:</b>\n" +
-          "1. Нажмите кнопку ниже или добавьте меня в группу вручную через управление группой.\n" +
-          "2. Назначьте меня <b>Администратором</b> с правами <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.\n\n" +
-          "После этого чат будет под надежной защитой 24/7!";
+          "1. Нажмите кнопку ниже или добавьте меня в группу.\n" +
+          "2. Назначьте меня <b>Администратором</b> с правами <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.";
 
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
@@ -201,15 +223,163 @@ export default {
         return new Response("OK");
       }
 
-      // Если в группе пишет администратор — игнорируем
+      // Обработка команд администраторов в группе
       if (await isAdmin(token, chatId, userId)) {
-        if (msg.text === "/start" || msg.text === "/help") {
+        const text = (msg.text || "").trim();
+        const parts = text.split(/\s+/);
+        const cmd = parts[0].toLowerCase().replace(/@.+$/, ''); // убираем @botname из /mute@botname
+
+        if (cmd === "/start" || cmd === "/help") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "🛡️ <b>Бот-модератор активен и защищает этот чат!</b>\nВсе ссылки, мат и спам от участников удаляются автоматически.",
+            text: "🛡️ <b>Бот-модератор активен!</b>\n\n" +
+                  "Команды администратора (ответом на сообщение нарушителя):\n" +
+                  "• <code>/mute 30m / 2h / 1d</code> — замутить пользователя\n" +
+                  "• <code>/unmute</code> — снять мут\n" +
+                  "• <code>/ban</code> — забанить\n" +
+                  "• <code>/warn [причина]</code> — выдать предупреждение\n" +
+                  "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя",
             parse_mode: "HTML"
           });
+          return new Response("OK");
         }
+
+        // Команда /mute
+        if (cmd === "/mute") {
+          if (!msg.reply_to_message || !msg.reply_to_message.from) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Используйте команду ответом на сообщение нарушителя: <code>/mute 30m</code> (или <code>2h</code>, <code>1d</code>)",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          const targetUser = msg.reply_to_message.from;
+          const durationStr = parts[1] || "24h";
+          let seconds = 86400;
+          const match = durationStr.match(/^(\d+)\s*([smhdдчмс]?)$/i);
+          if (match) {
+            const val = parseInt(match[1], 10);
+            const unit = (match[2] || "").toLowerCase();
+            if (unit === 's' || unit === 'с') seconds = val;
+            else if (unit === 'm' || unit === 'м') seconds = val * 60;
+            else if (unit === 'h' || unit === 'ч') seconds = val * 3600;
+            else if (unit === 'd' || unit === 'д') seconds = val * 86400;
+          }
+          const untilDate = Math.floor(Date.now() / 1000) + seconds;
+          await tgApi(token, "restrictChatMember", {
+            chat_id: chatId,
+            user_id: targetUser.id,
+            permissions: { can_send_messages: false },
+            until_date: untilDate
+          });
+          const mention = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🔇 Пользователь ${mention} замучен на <b>${durationStr}</b>.`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /unmute
+        if (cmd === "/unmute") {
+          if (!msg.reply_to_message || !msg.reply_to_message.from) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Ответьте на сообщение пользователя, чтобы снять мут.",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          const targetUser = msg.reply_to_message.from;
+          await tgApi(token, "restrictChatMember", {
+            chat_id: chatId,
+            user_id: targetUser.id,
+            permissions: {
+              can_send_messages: true,
+              can_send_audios: true,
+              can_send_documents: true,
+              can_send_photos: true,
+              can_send_videos: true,
+              can_send_other_messages: true,
+              can_add_web_page_previews: true
+            }
+          });
+          const mention = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🔊 Мут с пользователя ${mention} снят!`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /ban
+        if (cmd === "/ban") {
+          if (!msg.reply_to_message || !msg.reply_to_message.from) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Ответьте на сообщение нарушителя, чтобы забанить его.",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          const targetUser = msg.reply_to_message.from;
+          await tgApi(token, "banChatMember", { chat_id: chatId, user_id: targetUser.id });
+          const mention = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `⛔ Пользователь ${mention} навсегда забанен в чате.`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /unban
+        if (cmd === "/unban") {
+          let targetId = parts[1];
+          if (!targetId && msg.reply_to_message?.from) {
+            targetId = msg.reply_to_message.from.id;
+          }
+          if (targetId) {
+            await tgApi(token, "unbanChatMember", { chat_id: chatId, user_id: targetId, only_if_banned: true });
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `✅ Пользователь с ID <code>${targetId}</code> разбанен.`,
+              parse_mode: "HTML"
+            });
+          } else {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Укажите ID или ответьте на сообщение: <code>/unban &lt;ID&gt;</code>",
+              parse_mode: "HTML"
+            });
+          }
+          return new Response("OK");
+        }
+
+        // Команда /warn
+        if (cmd === "/warn") {
+          if (!msg.reply_to_message || !msg.reply_to_message.from) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Ответьте на сообщение нарушителя: <code>/warn [причина]</code>",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          const targetUser = msg.reply_to_message.from;
+          const reason = parts.slice(1).join(" ") || "Нарушение правил чата";
+          const mention = targetUser.username ? `@${targetUser.username}` : targetUser.first_name;
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `⚠️ Администратор выдал предупреждение ${mention}!\nПричина: <b>${reason}</b>`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
         return new Response("OK");
       }
 
