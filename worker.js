@@ -145,6 +145,14 @@ export default {
       });
     }
 
+    if (url.pathname === "/get-me") {
+      const res = await tgApi(token, "getMe", {});
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (request.method !== "POST") {
       return new Response("Telegram Moderator Bot is running on Cloudflare Workers!\nVisit /set-webhook to link bot.", { status: 200 });
     }
@@ -161,6 +169,14 @@ export default {
 
       // Ответ на /start и сообщения в ЛС
       if (msg.chat.type === "private") {
+        let botUsername = "shinymoderation_bot";
+        try {
+          const meRes = await (await tgApi(token, "getMe", {})).json();
+          if (meRes.ok && meRes.result?.username) {
+            botUsername = meRes.result.username;
+          }
+        } catch (e) {}
+
         const welcomeText =
           "🛡️ <b>Привет! Я бот-модератор для групп Telegram.</b>\n\n" +
           "<b>Что я делаю в группе автоматически:</b>\n" +
@@ -168,7 +184,7 @@ export default {
           "• 🤬 <b>Удаляю маты</b> (с защитой от обхода латиницей, точками, пробелами и цифрами)\n" +
           "• 🚫 <b>Блокирую спам</b> (CAPS LOCK, спам символами, рекламные пересылки из каналов)\n\n" +
           "<b>Как меня запустить:</b>\n" +
-          "1. Нажмите кнопку ниже или добавьте меня в группу.\n" +
+          "1. Нажмите кнопку ниже или добавьте меня в группу вручную через управление группой.\n" +
           "2. Назначьте меня <b>Администратором</b> с правами <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.\n\n" +
           "После этого чат будет под надежной защитой 24/7!";
 
@@ -178,7 +194,7 @@ export default {
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "➕ Добавить бота в группу", url: "https://t.me/shinymoderation?startgroup=true" }]
+              [{ text: "➕ Добавить бота в группу", url: `https://t.me/${botUsername}?startgroup=true` }]
             ]
           }
         });
