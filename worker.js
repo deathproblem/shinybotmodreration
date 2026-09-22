@@ -129,10 +129,7 @@ export default {
       return new Response("Telegram Moderator Bot is running on Cloudflare Workers!", { status: 200 });
     }
 
-    const token = env.BOT_TOKEN;
-    if (!token) {
-      return new Response("BOT_TOKEN is not configured in Environment Variables", { status: 500 });
-    }
+    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
 
     try {
       const update = await request.json();
