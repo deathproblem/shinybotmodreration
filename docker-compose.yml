@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  telegram-moderator-bot:
+    build: .
+    container_name: tg_moderator_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./moderator_bot.db:/app/moderator_bot.db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

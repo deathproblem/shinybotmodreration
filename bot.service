@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Moderator Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/telegram-moderator-bot
+ExecStart=/opt/telegram-moderator-bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/telegram-moderator-bot/.env
+
+[Install]
+WantedBy=multi-user.target
