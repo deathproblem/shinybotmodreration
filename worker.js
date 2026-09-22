@@ -125,11 +125,29 @@ async function isAdmin(token, chatId, userId) {
 
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== "POST") {
-      return new Response("Telegram Moderator Bot is running on Cloudflare Workers!", { status: 200 });
+    const url = new URL(request.url);
+    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
+
+    if (url.pathname === "/set-webhook") {
+      const webhookUrl = `${url.origin}/`;
+      const res = await tgApi(token, "setWebhook", { url: webhookUrl });
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
-    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
+    if (url.pathname === "/webhook-info") {
+      const res = await tgApi(token, "getWebhookInfo", {});
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (request.method !== "POST") {
+      return new Response("Telegram Moderator Bot is running on Cloudflare Workers!\nVisit /set-webhook to link bot.", { status: 200 });
+    }
 
     try {
       const update = await request.json();
