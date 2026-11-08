@@ -155,11 +155,24 @@ async function isAdmin(token, chatId, userId) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
+    const token = env?.BOT_TOKEN;
+    if (!token) {
+      return new Response("BOT_TOKEN is not configured in Environment Variables", { status: 500 });
+    }
+
+    // Optional secret verification from Telegram
+    const secretToken = env?.SECRET_TOKEN;
+    if (secretToken && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== secretToken) {
+      if (request.method === "POST") {
+        return new Response("Unauthorized", { status: 403 });
+      }
+    }
 
     if (url.pathname === "/set-webhook") {
       const webhookUrl = `${url.origin}/`;
-      const res = await tgApi(token, "setWebhook", { url: webhookUrl });
+      const payload = { url: webhookUrl };
+      if (secretToken) payload.secret_token = secretToken;
+      const res = await tgApi(token, "setWebhook", payload);
       const data = await res.json();
       return new Response(JSON.stringify(data, null, 2), {
         headers: { "Content-Type": "application/json" }
