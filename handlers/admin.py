@@ -273,3 +273,22 @@ async def cmd_rules(message: Message):
         "<i>За нарушения бот автоматически выдает мут!</i>"
     )
     await message.reply(rules_text, parse_mode="HTML")
+
+
+@router.message(Command("settings", "config"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_settings(message: Message, bot: Bot):
+    if not await is_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    text = (
+        f"⚙️ <b>Панель управления модерацией чата:</b>\n"
+        f"📍 <b>{message.chat.title}</b>\n\n"
+        f"🔗 <b>Фильтр ссылок:</b> {'✅ ВКЛ' if settings.ENABLE_LINK_FILTER else '❌ ВЫКЛ'} (Мут: {settings.MUTE_DURATION_HOURS}ч)\n"
+        f"🤬 <b>Фильтр мата:</b> {'✅ ВКЛ' if settings.ENABLE_PROFANITY_FILTER else '❌ ВЫКЛ'}\n"
+        f"📢 <b>Анти-капс/флуд:</b> {'✅ ВКЛ' if settings.ENABLE_SPAM_FILTER else '❌ ВЫКЛ'}\n"
+        f"⚠️ <b>Лимит варнов до мута:</b> {settings.MAX_WARNINGS}\n\n"
+        f"<i>Команды быстрой настройки:</i>\n"
+        f"• <code>/setmute &lt;время&gt;</code> — изменить длительность мута (напр. <code>/setmute 12h</code>)\n"
+        f"• <code>/rules</code> — показать правила чата"
+    )
+    await message.reply(text, parse_mode="HTML")

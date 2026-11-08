@@ -1,17 +1,67 @@
 // Cloudflare Worker: Telegram Hardcore Moderator Bot
-// Strict zero-tolerance moderation system for groups and supergroups
+// Strict zero-tolerance moderation system with customizable settings per chat
 
-// Hardcore Settings
-const SETTINGS = {
-  ENABLE_LINKS: true,
-  ENABLE_PROFANITY: true,
-  ENABLE_SPAM: true,
-  MAX_CAPS_PERCENT: 65,      // Снижен порог капса для жесткости (от 8 букв)
-  AUTO_DELETE_SEC: 6,        // Авто-удаление алертов бота через 6 секунд (стерильный чат)
-  MUTE_LINKS_SEC: 86400,     // Мут за ссылки: 24 часа
-  MUTE_PROFANITY_SEC: 7200,  // Мут за мат/оскорбления: 2 часа
-  MUTE_CAPS_SEC: 900         // Мут за капс/флуд: 15 минут
+// Default Settings
+const DEFAULT_SETTINGS = {
+  enable_links: true,
+  enable_profanity: true,
+  enable_spam: true,
+  enable_caps: true,
+  clean_service: true,
+  max_caps_percent: 65,
+  auto_delete_sec: 6,
+  mute_links_sec: 86400,     // 24 часа
+  mute_profanity_sec: 7200,  // 2 часа
+  mute_caps_sec: 900         // 15 минут
 };
+
+// Global in-memory storage for settings per chat
+const CHAT_SETTINGS = new Map();
+
+async function getChatSettings(env, chatId) {
+  const key = `settings_${chatId}`;
+  if (env?.SETTINGS_KV) {
+    try {
+      const data = await env.SETTINGS_KV.get(key, "json");
+      if (data) return { ...DEFAULT_SETTINGS, ...data };
+    } catch (e) {}
+  }
+  if (CHAT_SETTINGS.has(chatId)) {
+    return { ...DEFAULT_SETTINGS, ...CHAT_SETTINGS.get(chatId) };
+  }
+  return { ...DEFAULT_SETTINGS };
+}
+
+async function saveChatSettings(env, chatId, newSettings) {
+  const merged = { ...DEFAULT_SETTINGS, ...newSettings };
+  CHAT_SETTINGS.set(chatId, merged);
+  if (env?.SETTINGS_KV) {
+    try {
+      await env.SETTINGS_KV.put(`settings_${chatId}`, JSON.stringify(merged));
+    } catch (e) {}
+  }
+  return merged;
+}
+
+function formatDuration(sec) {
+  if (sec < 60) return `${sec} сек`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} ч`;
+  return `${Math.floor(sec / 86400)} дн`;
+}
+
+function parseDurationInput(str) {
+  if (!str) return null;
+  const match = str.trim().toLowerCase().match(/^(\d+)\s*([smhdдчмс]?)$/i);
+  if (!match) return null;
+  const val = parseInt(match[1], 10);
+  const unit = match[2] || 'm';
+  if (unit === 's' || unit === 'с') return val;
+  if (unit === 'm' || unit === 'м') return val * 60;
+  if (unit === 'h' || unit === 'ч') return val * 3600;
+  if (unit === 'd' || unit === 'д') return val * 86400;
+  return val * 60;
+}
 
 // Whitelist of words containing roots that might trigger false positives
 const WHITELIST = [
@@ -119,7 +169,6 @@ function hasProfanity(text) {
 
 // 3. База стоп-фраз мошенников, спамеров и нежелательной рекламы (КАРА: БАН НАВСЕГДА)
 const SCAM_PATTERNS = [
-  // Заработок / деньги / удаленка
   /пассивн(?:ый|ого|ому|ом|ым)\s+доход/i,
   /заработ(?:ок|ать|ай|ывай|аем)/i,
   /(?:доход|заработок)\s+от\s+\d+/i,
@@ -135,16 +184,12 @@ const SCAM_PATTERNS = [
   /требуются\s+(?:люди|девушки|парни|сотрудники)/i,
   /вложений\s+не\s+требуется/i,
   /без\s+вложений/i,
-
-  // Призывы писать в личку
   /пиши(?:те)?\s+(?:мне\s+)?в\s+(?:лс|личку|директ|тг)/i,
   /жду\s+в\s+(?:лс|личке)/i,
   /отве(?:тил|тила)\s+в\s+лс/i,
   /скинул[а]?\s+в\s+лс/i,
   /подробност[ией]+\s+в\s+(?:лс|профиле|описании|закрепе)/i,
   /ссылк[аеу]\s+в\s+(?:профиле|шапке|био|закрепе)/i,
-
-  // Крипто-скам / пампы / сигналы / арбитраж
   /сигнал[ыов]+\s+по\s+крипт/i,
   /инвестици[иях]\s+от/i,
   /дарю\s+(?:крипт|usdt|тон|ton|btc|биткоин)/i,
@@ -154,14 +199,10 @@ const SCAM_PATTERNS = [
   /раскрутк[аеи]\s+(?:счета|депозита)/i,
   /удвою\s+(?:баланс|депозит)/i,
   /эйрдроп|airdrop|whitelist|вайтлист/i,
-
-  // 18+ / сливы / порно
   /слив\s+(?:приват|шкур|фото|видео|переписок)/i,
   /интим\s*(?:фото|видео|знакомств)/i,
   /порно|проститутка|эскорт/i,
   /меф|гашиш|бошки|закладк[иа]/i,
-
-  // Накрутка / читы / взлом
   /накрутк[аеи]\s+(?:подписчиков|лайков|ботов)/i,
   /взлом\s+(?:вк|тг|телеграм|аккаунт)/i,
   /продам\s+аккаунт/i,
@@ -171,17 +212,14 @@ const SCAM_PATTERNS = [
 function checkScamOrPromo(msg) {
   const text = msg.text || msg.caption || "";
 
-  // Рекламные пересылки из других каналов
   if (msg.forward_origin?.type === "channel" || msg.forward_from_chat?.type === "channel") {
     return "Рекламный репост из стороннего канала";
   }
 
-  // Стоп-фразы скамеров
   for (let reg of SCAM_PATTERNS) {
     if (reg.test(text)) return "Рекламный спам / мошенничество";
   }
 
-  // Массовые упоминания (@user1 @user2 @user3...)
   const mentions = (msg.entities || []).filter(e => e.type === "mention" || e.type === "text_mention");
   if (mentions.length >= 3) return "Массовый спам упоминаниями пользователей";
 
@@ -189,19 +227,17 @@ function checkScamOrPromo(msg) {
 }
 
 // 4. Проверка капса и спама символами
-function checkCapsOrFlooding(msg) {
+function checkCapsOrFlooding(msg, maxCapsPercent) {
   const text = msg.text || msg.caption || "";
 
-  // CAPS LOCK
   const letters = text.replace(/[^a-zA-Zа-яёА-ЯЁ]/g, '');
   if (letters.length >= 8) {
     const upper = letters.replace(/[^A-ZА-ЯЁ]/g, '').length;
-    if ((upper / letters.length) * 100 >= SETTINGS.MAX_CAPS_PERCENT) {
+    if ((upper / letters.length) * 100 >= (maxCapsPercent || 65)) {
       return "Злоупотребление CAPS LOCK";
     }
   }
 
-  // Повторяющиеся символы (аааааа...)
   if (/(.)\1{20,}/.test(text)) return "Спам повторяющимися символами";
 
   return null;
@@ -222,6 +258,242 @@ async function isAdmin(token, chatId, userId) {
   } catch (e) {
     return false;
   }
+}
+
+// ==========================================
+// РЕНДЕРИНГ МЕНЮ НАСТРОЕК (INLINE KEYBOARDS)
+// ==========================================
+
+function renderMainMenu(chatId, chatTitle, s) {
+  const text =
+    `⚙️ <b>Панель управления модерацией:</b>\n` +
+    `📍 <b>${chatTitle || "Этот чат"}</b>\n\n` +
+    `🔗 <b>Фильтр ссылок:</b> ${s.enable_links ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Мут: <b>${formatDuration(s.mute_links_sec)}</b>)\n` +
+    `🤬 <b>Фильтр мата:</b> ${s.enable_profanity ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Мут: <b>${formatDuration(s.mute_profanity_sec)}</b>)\n` +
+    `📢 <b>Анти-капс:</b> ${s.enable_caps ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Мут: <b>${formatDuration(s.mute_caps_sec)}</b>)\n` +
+    `🚨 <b>Анти-скам/реклама:</b> ${s.enable_spam ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Наказание: <b>БАН</b>)\n` +
+    `🧹 <b>Удаление входов/выходов:</b> ${s.clean_service ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n\n` +
+    `<i>Нажимайте кнопки для переключения фильтров или настройки длительности мутов:</i>`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: s.enable_links ? "🔗 Ссылки: ВКЛ" : "🔗 Ссылки: ВЫКЛ", callback_data: "cfg_toggle_links" },
+        { text: `⏱️ Мут: ${formatDuration(s.mute_links_sec)}`, callback_data: "cfg_menu_links" }
+      ],
+      [
+        { text: s.enable_profanity ? "🤬 Мат: ВКЛ" : "🤬 Мат: ВЫКЛ", callback_data: "cfg_toggle_prof" },
+        { text: `⏱️ Мут: ${formatDuration(s.mute_profanity_sec)}`, callback_data: "cfg_menu_prof" }
+      ],
+      [
+        { text: s.enable_caps ? "📢 Капс: ВКЛ" : "📢 Капс: ВЫКЛ", callback_data: "cfg_toggle_caps" },
+        { text: `⏱️ Мут: ${formatDuration(s.mute_caps_sec)}`, callback_data: "cfg_menu_caps" }
+      ],
+      [
+        { text: s.enable_spam ? "🚨 Скам: ВКЛ" : "🚨 Скам: ВЫКЛ", callback_data: "cfg_toggle_spam" },
+        { text: s.clean_service ? "🧹 Чистка: ВКЛ" : "🧹 Чистка: ВЫКЛ", callback_data: "cfg_toggle_service" }
+      ],
+      [
+        { text: "🔄 Сброс настроек", callback_data: "cfg_reset" },
+        { text: "❌ Закрыть панель", callback_data: "cfg_close" }
+      ]
+    ]
+  };
+
+  return { text, reply_markup };
+}
+
+function renderMuteLinksMenu(chatTitle, s) {
+  const text =
+    `⏱️ <b>Настройка мута за ссылки и упоминания:</b>\n` +
+    `Текущее значение: <b>${formatDuration(s.mute_links_sec)}</b>\n\n` +
+    `<i>Выберите новую длительность мута для нарушителей:</i>`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: "15 минут", callback_data: "cfg_set_links_900" },
+        { text: "1 час", callback_data: "cfg_set_links_3600" },
+        { text: "6 часов", callback_data: "cfg_set_links_21600" }
+      ],
+      [
+        { text: "12 часов", callback_data: "cfg_set_links_43200" },
+        { text: "24 часа (1 д)", callback_data: "cfg_set_links_86400" },
+        { text: "3 дня", callback_data: "cfg_set_links_259200" }
+      ],
+      [
+        { text: "7 дней", callback_data: "cfg_set_links_604800" },
+        { text: "30 дней", callback_data: "cfg_set_links_2592000" }
+      ],
+      [
+        { text: "⬅️ Назад в главное меню", callback_data: "cfg_main" }
+      ]
+    ]
+  };
+  return { text, reply_markup };
+}
+
+function renderMuteProfMenu(chatTitle, s) {
+  const text =
+    `⏱️ <b>Настройка мута за мат и оскорбления:</b>\n` +
+    `Текущее значение: <b>${formatDuration(s.mute_profanity_sec)}</b>\n\n` +
+    `<i>Выберите новую длительность мута для нарушителей:</i>`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: "10 минут", callback_data: "cfg_set_prof_600" },
+        { text: "30 минут", callback_data: "cfg_set_prof_1800" },
+        { text: "1 час", callback_data: "cfg_set_prof_3600" }
+      ],
+      [
+        { text: "2 часа", callback_data: "cfg_set_prof_7200" },
+        { text: "6 часов", callback_data: "cfg_set_prof_21600" },
+        { text: "24 часа (1 д)", callback_data: "cfg_set_prof_86400" }
+      ],
+      [
+        { text: "3 дня", callback_data: "cfg_set_prof_259200" },
+        { text: "7 дней", callback_data: "cfg_set_prof_604800" }
+      ],
+      [
+        { text: "⬅️ Назад в главное меню", callback_data: "cfg_main" }
+      ]
+    ]
+  };
+  return { text, reply_markup };
+}
+
+function renderMuteCapsMenu(chatTitle, s) {
+  const text =
+    `⏱️ <b>Настройка мута за CAPS LOCK и флуд:</b>\n` +
+    `Текущее значение: <b>${formatDuration(s.mute_caps_sec)}</b>\n\n` +
+    `<i>Выберите новую длительность мута для нарушителей:</i>`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: "5 минут", callback_data: "cfg_set_caps_300" },
+        { text: "15 минут", callback_data: "cfg_set_caps_900" },
+        { text: "30 минут", callback_data: "cfg_set_caps_1800" }
+      ],
+      [
+        { text: "1 час", callback_data: "cfg_set_caps_3600" },
+        { text: "3 часа", callback_data: "cfg_set_caps_10800" },
+        { text: "24 часа (1 д)", callback_data: "cfg_set_caps_86400" }
+      ],
+      [
+        { text: "⬅️ Назад в главное меню", callback_data: "cfg_main" }
+      ]
+    ]
+  };
+  return { text, reply_markup };
+}
+
+// Обработка кликов по инлайн-кнопкам настроек
+async function handleCallbackQuery(token, env, cq) {
+  const chatId = cq.message?.chat?.id;
+  const userId = cq.from?.id;
+  const messageId = cq.message?.message_id;
+  const data = cq.data || "";
+
+  if (!chatId || !userId) {
+    return new Response("OK");
+  }
+
+  // Только администраторы могут управлять настройками
+  if (!await isAdmin(token, chatId, userId)) {
+    await tgApi(token, "answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: "❌ Только администраторы могут менять настройки модерации!",
+      show_alert: true
+    });
+    return new Response("OK");
+  }
+
+  const settings = await getChatSettings(env, chatId);
+  let changed = false;
+  let subMenu = null;
+
+  if (data === "cfg_close") {
+    await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: messageId });
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Панель настроек закрыта" });
+    return new Response("OK");
+  }
+
+  if (data === "cfg_reset") {
+    await saveChatSettings(env, chatId, DEFAULT_SETTINGS);
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Настройки сброшены по умолчанию!" });
+    const { text, reply_markup } = renderMainMenu(chatId, cq.message?.chat?.title, DEFAULT_SETTINGS);
+    await tgApi(token, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      reply_markup
+    });
+    return new Response("OK");
+  }
+
+  if (data === "cfg_toggle_links") {
+    settings.enable_links = !settings.enable_links;
+    changed = true;
+  } else if (data === "cfg_toggle_prof") {
+    settings.enable_profanity = !settings.enable_profanity;
+    changed = true;
+  } else if (data === "cfg_toggle_spam") {
+    settings.enable_spam = !settings.enable_spam;
+    changed = true;
+  } else if (data === "cfg_toggle_caps") {
+    settings.enable_caps = !settings.enable_caps;
+    changed = true;
+  } else if (data === "cfg_toggle_service") {
+    settings.clean_service = !settings.clean_service;
+    changed = true;
+  } else if (data === "cfg_menu_links") {
+    subMenu = "links";
+  } else if (data === "cfg_menu_prof") {
+    subMenu = "prof";
+  } else if (data === "cfg_menu_caps") {
+    subMenu = "caps";
+  } else if (data.startsWith("cfg_set_links_")) {
+    settings.mute_links_sec = parseInt(data.replace("cfg_set_links_", ""), 10);
+    changed = true;
+  } else if (data.startsWith("cfg_set_prof_")) {
+    settings.mute_profanity_sec = parseInt(data.replace("cfg_set_prof_", ""), 10);
+    changed = true;
+  } else if (data.startsWith("cfg_set_caps_")) {
+    settings.mute_caps_sec = parseInt(data.replace("cfg_set_caps_", ""), 10);
+    changed = true;
+  }
+
+  if (changed) {
+    await saveChatSettings(env, chatId, settings);
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "✅ Настройки сохранены!" });
+  } else {
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+  }
+
+  const chatTitle = cq.message?.chat?.title || "Этот чат";
+  let payload;
+  if (subMenu === "links") {
+    payload = renderMuteLinksMenu(chatTitle, settings);
+  } else if (subMenu === "prof") {
+    payload = renderMuteProfMenu(chatTitle, settings);
+  } else if (subMenu === "caps") {
+    payload = renderMuteCapsMenu(chatTitle, settings);
+  } else {
+    payload = renderMainMenu(chatId, chatTitle, settings);
+  }
+
+  await tgApi(token, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: payload.text,
+    parse_mode: "HTML",
+    reply_markup: payload.reply_markup
+  });
+
+  return new Response("OK");
 }
 
 export default {
@@ -257,8 +529,8 @@ export default {
     if (url.pathname === "/set-commands") {
       const commands = [
         { command: "start", description: "Запустить бота и получить информацию" },
-        { command: "help", description: "Справка по командам модератора" },
-        { command: "rules", description: "Показать правила чата (Жесткий режим)" },
+        { command: "settings", description: "Настройки фильтров и времени мутов" },
+        { command: "rules", description: "Показать правила чата" },
         { command: "mute", description: "Замутить (ответом: /mute 30m / 2h / 1d)" },
         { command: "unmute", description: "Снять мут с пользователя (ответом)" },
         { command: "kick", description: "Выгнать пользователя из группы (ответом)" },
@@ -280,16 +552,25 @@ export default {
 
     try {
       const update = await request.json();
+
+      // 1. Обработка нажатий на кнопки в меню /settings
+      if (update.callback_query) {
+        return await handleCallbackQuery(token, env, update.callback_query);
+      }
+
       const msg = update.message;
       if (!msg || !msg.chat) {
         return new Response("OK");
       }
 
       const chatId = msg.chat.id;
+      const chatSettings = await getChatSettings(env, chatId);
 
       // 🧹 Стерильность: Мгновенное авто-удаление системных сообщений
       if (msg.new_chat_members || msg.left_chat_member || msg.pinned_message) {
-        await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        if (chatSettings.clean_service) {
+          await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        }
 
         // Анти-рейд: мгновенный БАН ботов со ссылками или рекламой в имени при входе
         if (msg.new_chat_members) {
@@ -320,20 +601,25 @@ export default {
         } catch (e) {}
 
         const welcomeText =
-          "🛡️ <b>Привет! Я бот с жестким режимом модерации групп.</b>\n\n" +
-          "<b>Правила жесткой системы:</b>\n" +
-          "• 🚨 <b>Спам, реклама, крипта, заработок</b> $\\rightarrow$ <b>БАН НАВСЕГДА</b>\n" +
-          "• 🔗 <b>Любые ссылки, скрытые ссылки и теги</b> $\\rightarrow$ <b>МУТ НА 24 ЧАСА</b>\n" +
-          "• 🤬 <b>Нецензурная лексика и оскорбления</b> $\\rightarrow$ <b>МУТ НА 2 ЧАСА</b>\n" +
-          "• 📢 <b>Капслок и спам символами</b> $\\rightarrow$ <b>МУТ НА 15 МИНУТ</b>\n" +
-          "• 🧹 <b>Стерильный чат</b>: системные сообщения входа/выхода удаляются сразу.\n\n" +
+          "🛡️ <b>Привет! Я бот-модератор с гибкими настройками для групп.</b>\n\n" +
+          "<b>Возможности:</b>\n" +
+          "• ⚙️ <b>Интерактивная панель</b> <code>/settings</code> — настраивайте длительность мутов и фильтры кнопками!\n" +
+          "• 🚨 <b>Анти-скам</b> — мгновенный бан за рекламу заработка, криптовалют и спам.\n" +
+          "• 🔗 <b>Анти-ссылки</b> — блокировка любых доменов, скрытых ссылок и тегов.\n" +
+          "• 🤬 <b>Анти-мат</b> — фильтр ненормативной лексики с защитой от обхода.\n" +
+          "• 📢 <b>Анти-капс</b> — удаление сообщений капслоком и флуда.\n" +
+          "• 🧹 <b>Чистка чата</b> — скрытие системных уведомлений входа/выхода.\n\n" +
           "<b>Команды администраторов:</b>\n" +
-          "• <code>/rules</code> — правила чата\n" +
-          "• <code>/mute [время]</code> — замутить нарушителя\n" +
+          "• <code>/settings</code> — открыть интерактивную панель настроек\n" +
+          "• <code>/setmute links 12h</code> — настроить мут за ссылки\n" +
+          "• <code>/setmute profanity 1h</code> — настроить мут за мат\n" +
+          "• <code>/setmute caps 30m</code> — настроить мут за капс\n" +
+          "• <code>/rules</code> — показать правила чата\n" +
+          "• <code>/mute [время]</code> — замутить нарушителя вручную\n" +
           "• <code>/unmute</code> — снять мут\n" +
           "• <code>/kick</code> — выгнать из группы\n" +
           "• <code>/ban</code> — забанить навсегда\n" +
-          "• <code>/del</code> — удалить сообщение\n" +
+          "• <code>/del</code> — быстро удалить сообщение\n" +
           "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя\n\n" +
           "<b>Как запустить:</b> добавьте бота в группу и назначьте <b>Администратором</b> с правами на удаление сообщений и блокировку пользователей.";
 
@@ -350,27 +636,147 @@ export default {
         return new Response("OK");
       }
 
-      // Администраторыチャта имеют иммунитет к фильтрам
+      // Администраторы чата имеют доступ к настройкам и иммунитет
       if (await isAdmin(token, chatId, userId)) {
         const text = (msg.text || "").trim();
         const parts = text.split(/\s+/);
         const cmd = parts[0].toLowerCase().replace(/@.+$/, '');
 
+        // Открытие интерактивной панели настроек
+        if (cmd === "/settings" || cmd === "/config") {
+          const payload = renderMainMenu(chatId, msg.chat.title, chatSettings);
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: payload.text,
+            parse_mode: "HTML",
+            reply_markup: payload.reply_markup
+          });
+          return new Response("OK");
+        }
+
+        // Быстрая настройка мутов командой: /setmute links 12h / /setmute profanity 1h / /setmute caps 30m
+        if (cmd === "/setmute") {
+          const target = (parts[1] || "").toLowerCase();
+          const durationStr = parts[2] || "";
+          const seconds = parseDurationInput(durationStr);
+
+          if (!target || !seconds) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ <b>Использование:</b> <code>/setmute &lt;тип&gt; &lt;время&gt;</code>\n\n" +
+                    "<b>Типы:</b>\n" +
+                    "• <code>links</code> — за ссылки (пример: <code>/setmute links 12h</code>, <code>1d</code>)\n" +
+                    "• <code>profanity</code> (или <code>prof</code>) — за мат (пример: <code>/setmute prof 1h</code>)\n" +
+                    "• <code>caps</code> — за капслок (пример: <code>/setmute caps 30m</code>)",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
+          if (target === "links" || target === "link") {
+            chatSettings.mute_links_sec = seconds;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `✅ <b>Длительность мута за ссылки изменена:</b> <code>${formatDuration(seconds)}</code>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
+          if (target === "profanity" || target === "prof" || target === "мат") {
+            chatSettings.mute_profanity_sec = seconds;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `✅ <b>Длительность мута за мат изменена:</b> <code>${formatDuration(seconds)}</code>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
+          if (target === "caps" || target === "капс") {
+            chatSettings.mute_caps_sec = seconds;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `✅ <b>Длительность мута за капс изменена:</b> <code>${formatDuration(seconds)}</code>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+        }
+
+        // Быстрое переключение фильтров командой: /toggle <фильтр>
+        if (cmd === "/toggle") {
+          const target = (parts[1] || "").toLowerCase();
+          if (target === "links" || target === "link") {
+            chatSettings.enable_links = !chatSettings.enable_links;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `🔗 Фильтр ссылок: <b>${chatSettings.enable_links ? '✅ ВКЛЮЧЕН' : '❌ ВЫКЛЮЧЕН'}</b>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          if (target === "prof" || target === "profanity" || target === "мат") {
+            chatSettings.enable_profanity = !chatSettings.enable_profanity;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `🤬 Фильтр мата: <b>${chatSettings.enable_profanity ? '✅ ВКЛЮЧЕН' : '❌ ВЫКЛЮЧЕН'}</b>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          if (target === "spam" || target === "скам") {
+            chatSettings.enable_spam = !chatSettings.enable_spam;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `🚨 Анти-скам/реклама: <b>${chatSettings.enable_spam ? '✅ ВКЛЮЧЕН' : '❌ ВЫКЛЮЧЕН'}</b>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          if (target === "caps" || target === "капс") {
+            chatSettings.enable_caps = !chatSettings.enable_caps;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `📢 Анти-капс: <b>${chatSettings.enable_caps ? '✅ ВКЛЮЧЕН' : '❌ ВЫКЛЮЧЕН'}</b>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+          if (target === "service" || target === "чистка") {
+            chatSettings.clean_service = !chatSettings.clean_service;
+            await saveChatSettings(env, chatId, chatSettings);
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `🧹 Чистка входов/выходов: <b>${chatSettings.clean_service ? '✅ ВКЛЮЧЕНА' : '❌ ВЫКЛЮЧЕНА'}</b>`,
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+        }
+
         if (cmd === "/start" || cmd === "/help") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "🛡️ <b>Жесткая система модерации активна!</b>\n\n" +
-                  "Нарушители караются мгновенно:\n" +
-                  "• Реклама/Скам $\\rightarrow$ <b>БАН</b>\n" +
-                  "• Ссылки $\\rightarrow$ <b>МУТ 24ч</b>\n" +
-                  "• Мат $\\rightarrow$ <b>МУТ 2ч</b>\n" +
-                  "• Капс $\\rightarrow$ <b>МУТ 15м</b>\n\n" +
-                  "Команды администратора (ответом на сообщение):\n" +
+            text: "🛡️ <b>Бот-модератор активен!</b>\n\n" +
+                  "<b>Управление настройками:</b>\n" +
+                  "• <code>/settings</code> — открыть панель настройки фильтров и мутов\n" +
+                  "• <code>/setmute links 12h</code> — настроить мут за ссылки\n" +
+                  "• <code>/setmute prof 2h</code> — настроить мут за мат\n" +
+                  "• <code>/setmute caps 15m</code> — настроить мут за капс\n\n" +
+                  "<b>Команды модерации (ответом на сообщение):</b>\n" +
                   "• <code>/rules</code> — показать правила чата\n" +
-                  "• <code>/mute 30m / 2h / 1d</code> — замутить\n" +
+                  "• <code>/mute 30m / 2h / 1d</code> — замутить нарушителя\n" +
                   "• <code>/unmute</code> — снять мут\n" +
-                  "• <code>/kick</code> — выгнать\n" +
-                  "• <code>/ban</code> — забанить\n" +
+                  "• <code>/kick</code> — выгнать из группы\n" +
+                  "• <code>/ban</code> — забанить навсегда\n" +
                   "• <code>/del</code> — быстро удалить сообщение\n" +
                   "• <code>/unban &lt;ID&gt;</code> — разбанить по ID",
             parse_mode: "HTML"
@@ -381,12 +787,12 @@ export default {
         if (cmd === "/rules") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА (ЖЕСТКИЙ РЕЖИМ):</b>\n\n" +
-                  "1. 🚨 <b>Никакого спама, рекламы, криптовалют и заработков</b> — карается <b>перманентным баном</b>.\n" +
-                  "2. 🔗 <b>Никаких ссылок и сторонних упоминаний</b> — карается <b>мутом на 24 часа</b>.\n" +
-                  "3. 🤬 <b>Уважайте участников</b> — нецензурная брань и оскорбления караются <b>мутом на 2 часа</b>.\n" +
-                  "4. 📢 <b>Без капса и флуда</b> — карается <b>мутом на 15 минут</b>.\n\n" +
-                  "<i>Бот модерирует группу в реальном времени. Нарушения удаляются моментально!</i>",
+            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА:</b>\n\n" +
+                  "1. 🚨 <b>Спам, реклама, криптовалюты и схемы заработка</b> — перманентный бан.\n" +
+                  `2. 🔗 <b>Ссылки и сторонние теги</b> — ${chatSettings.enable_links ? `мут на ${formatDuration(chatSettings.mute_links_sec)}` : 'разрешены'}.\n` +
+                  `3. 🤬 <b>Нецензурная брань и оскорбления</b> — ${chatSettings.enable_profanity ? `мут на ${formatDuration(chatSettings.mute_profanity_sec)}` : 'разрешены'}.\n` +
+                  `4. 📢 <b>Капслок и флуд</b> — ${chatSettings.enable_caps ? `мут на ${formatDuration(chatSettings.mute_caps_sec)}` : 'разрешены'}.\n\n` +
+                  "<i>Бот модерирует группу в реальном времени. Нарушения удаляются автоматически.</i>",
             parse_mode: "HTML"
           });
           return new Response("OK");
@@ -432,16 +838,7 @@ export default {
           }
           const targetUser = msg.reply_to_message.from;
           const durationStr = parts[1] || "24h";
-          let seconds = 86400;
-          const match = durationStr.match(/^(\d+)\s*([smhdдчмс]?)$/i);
-          if (match) {
-            const val = parseInt(match[1], 10);
-            const unit = (match[2] || "").toLowerCase();
-            if (unit === 's' || unit === 'с') seconds = val;
-            else if (unit === 'm' || unit === 'м') seconds = val * 60;
-            else if (unit === 'h' || unit === 'ч') seconds = val * 3600;
-            else if (unit === 'd' || unit === 'д') seconds = val * 86400;
-          }
+          const seconds = parseDurationInput(durationStr) || 86400;
           const untilDate = Math.floor(Date.now() / 1000) + seconds;
           await tgApi(token, "restrictChatMember", {
             chat_id: chatId,
@@ -556,41 +953,43 @@ export default {
       }
 
       // ==========================================
-      // ЖЕСТКАЯ АВТО-МОДЕРАЦИЯ СООБЩЕНИЙ УЧАСТНИКОВ
+      // МОДЕРАЦИЯ СООБЩЕНИЙ ПО НАСТРОЙКАМ ЧАТА
       // ==========================================
       const text = msg.text || msg.caption || "";
       const mention = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
 
       // 1. ПРОВЕРКА НА СПАМ, СКАМ, РЕКЛАМУ И КРИПТУ -> БАН НАВСЕГДА
-      const scamReason = checkScamOrPromo(msg);
-      if (scamReason) {
-        await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
-        await tgApi(token, "banChatMember", { chat_id: chatId, user_id: userId });
+      if (chatSettings.enable_spam) {
+        const scamReason = checkScamOrPromo(msg);
+        if (scamReason) {
+          await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+          await tgApi(token, "banChatMember", { chat_id: chatId, user_id: userId });
 
-        const alertRes = await (await tgApi(token, "sendMessage", {
-          chat_id: chatId,
-          text: `🚨 <b>Нарушитель заблокирован навсегда!</b>\n` +
-                `👤 Пользователь: ${mention}\n` +
-                `⛔ Нарушение: <b>${scamReason}</b>\n` +
-                `<i>Реклама и спам пресекаются моментально.</i>`,
-          parse_mode: "HTML"
-        })).json();
+          const alertRes = await (await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🚨 <b>Нарушитель заблокирован навсегда!</b>\n` +
+                  `👤 Пользователь: ${mention}\n` +
+                  `⛔ Нарушение: <b>${scamReason}</b>\n` +
+                  `<i>Реклама и спам пресекаются моментально.</i>`,
+            parse_mode: "HTML"
+          })).json();
 
-        if (alertRes.ok && alertRes.result?.message_id) {
-          ctx.waitUntil(new Promise(resolve => {
-            setTimeout(async () => {
-              await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
-              resolve();
-            }, SETTINGS.AUTO_DELETE_SEC * 1000);
-          }));
+          if (alertRes.ok && alertRes.result?.message_id) {
+            ctx.waitUntil(new Promise(resolve => {
+              setTimeout(async () => {
+                await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
+                resolve();
+              }, chatSettings.auto_delete_sec * 1000);
+            }));
+          }
+          return new Response("OK");
         }
-        return new Response("OK");
       }
 
-      // 2. ПРОВЕРКА НА ССЫЛКИ И ТЕГИ -> МУТ НА 24 ЧАСА
-      if (SETTINGS.ENABLE_LINKS && hasLinks(msg)) {
+      // 2. ПРОВЕРКА НА ССЫЛКИ И ТЕГИ -> МУТ НА НАСТРОЕННЫЙ СРОК
+      if (chatSettings.enable_links && hasLinks(msg)) {
         await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
-        const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_LINKS_SEC;
+        const untilDate = Math.floor(Date.now() / 1000) + chatSettings.mute_links_sec;
         await tgApi(token, "restrictChatMember", {
           chat_id: chatId,
           user_id: userId,
@@ -600,7 +999,7 @@ export default {
 
         const alertRes = await (await tgApi(token, "sendMessage", {
           chat_id: chatId,
-          text: `🔇 ${mention} <b>отправлен в мут на 24 часа!</b>\n` +
+          text: `🔇 ${mention} <b>отправлен в мут на ${formatDuration(chatSettings.mute_links_sec)}!</b>\n` +
                 `⛔ Причина: <b>Публикация ссылок и упоминаний запрещена</b>`,
           parse_mode: "HTML"
         })).json();
@@ -610,16 +1009,16 @@ export default {
             setTimeout(async () => {
               await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
               resolve();
-            }, SETTINGS.AUTO_DELETE_SEC * 1000);
+            }, chatSettings.auto_delete_sec * 1000);
           }));
         }
         return new Response("OK");
       }
 
-      // 3. ПРОВЕРКА НА МАТ И ОСКОРБЛЕНИЯ -> МУТ НА 2 ЧАСА
-      if (SETTINGS.ENABLE_PROFANITY && hasProfanity(text)) {
+      // 3. ПРОВЕРКА НА МАТ И ОСКОРБЛЕНИЯ -> МУТ НА НАСТРОЕННЫЙ СРОК
+      if (chatSettings.enable_profanity && hasProfanity(text)) {
         await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
-        const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_PROFANITY_SEC;
+        const untilDate = Math.floor(Date.now() / 1000) + chatSettings.mute_profanity_sec;
         await tgApi(token, "restrictChatMember", {
           chat_id: chatId,
           user_id: userId,
@@ -629,7 +1028,7 @@ export default {
 
         const alertRes = await (await tgApi(token, "sendMessage", {
           chat_id: chatId,
-          text: `🤬 ${mention} <b>замучен на 2 часа!</b>\n` +
+          text: `🤬 ${mention} <b>замучен на ${formatDuration(chatSettings.mute_profanity_sec)}!</b>\n` +
                 `⛔ Причина: <b>Нецензурная брань и оскорбления</b>`,
           parse_mode: "HTML"
         })).json();
@@ -639,18 +1038,18 @@ export default {
             setTimeout(async () => {
               await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
               resolve();
-            }, SETTINGS.AUTO_DELETE_SEC * 1000);
+            }, chatSettings.auto_delete_sec * 1000);
           }));
         }
         return new Response("OK");
       }
 
-      // 4. ПРОВЕРКА НА КАПС И СПАМ СИМВОЛАМИ -> МУТ НА 15 МИНУТ
-      if (SETTINGS.ENABLE_SPAM) {
-        const capsReason = checkCapsOrFlooding(msg);
+      // 4. ПРОВЕРКА НА КАПС И СПАМ СИМВОЛАМИ -> МУТ НА НАСТРОЕННЫЙ СРОК
+      if (chatSettings.enable_caps) {
+        const capsReason = checkCapsOrFlooding(msg, chatSettings.max_caps_percent);
         if (capsReason) {
           await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
-          const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_CAPS_SEC;
+          const untilDate = Math.floor(Date.now() / 1000) + chatSettings.mute_caps_sec;
           await tgApi(token, "restrictChatMember", {
             chat_id: chatId,
             user_id: userId,
@@ -660,7 +1059,7 @@ export default {
 
           const alertRes = await (await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: `⚠️ ${mention} <b>замучен на 15 минут!</b>\n` +
+            text: `⚠️ ${mention} <b>замучен на ${formatDuration(chatSettings.mute_caps_sec)}!</b>\n` +
                   `⛔ Причина: <b>${capsReason}</b>`,
             parse_mode: "HTML"
           })).json();
@@ -670,7 +1069,7 @@ export default {
               setTimeout(async () => {
                 await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
                 resolve();
-              }, SETTINGS.AUTO_DELETE_SEC * 1000);
+              }, chatSettings.auto_delete_sec * 1000);
             }));
           }
           return new Response("OK");
