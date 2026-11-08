@@ -15,17 +15,17 @@ const DEFAULT_SETTINGS = {
   mute_caps_sec: 900         // 15 минут
 };
 
-// Единственные официальные владельцы бота с полным глобальным иммунитетом
-const OWNER_USERNAMES = ["fuckingmyhearts", "deathh1337"];
+// Единственный официальный владелец бота с полным глобальным иммунитетом
+const OWNER_USERNAMES = ["deathh1337"];
 
-// Хранилище настроек, известных чатов и проверенных ID владельцев
+// Хранилище настроек, известных чатов и проверенных ID владельца
 const CHAT_SETTINGS = new Map();
 const KNOWN_CHATS = new Map();
 const OWNER_IDS = new Set();
 
 // Проверка: является ли пользователь владельцем бота
 function checkIsOwner(userId, username) {
-  if (username && OWNER_USERNAMES.includes(username.toLowerCase())) {
+  if (username && username.toLowerCase() === "deathh1337") {
     return true;
   }
   if (userId && OWNER_IDS.has(userId)) {
@@ -38,7 +38,7 @@ function checkIsOwner(userId, username) {
 async function loadCacheState() {
   try {
     const cache = caches.default;
-    const req = new Request("https://shiny-storage.internal/state");
+    const req = new Request("https://shiny-storage.internal/state-v2");
     const res = await cache.match(req);
     if (res) {
       const data = await res.json();
@@ -64,7 +64,7 @@ async function loadCacheState() {
 async function saveCacheState(ctx) {
   try {
     const cache = caches.default;
-    const req = new Request("https://shiny-storage.internal/state");
+    const req = new Request("https://shiny-storage.internal/state-v2");
     const data = {
       chats: Object.fromEntries(KNOWN_CHATS),
       settings: Object.fromEntries(CHAT_SETTINGS),
@@ -233,7 +233,7 @@ function renderDashboard(userId, username, isOwner) {
   const addUrl = `https://t.me/${botUsername}?startgroup=true&admin=delete_messages+restrict_members`;
 
   if (isOwner) {
-    // Панель только для реального владельца (@fuckingmyhearts / @deathh1337)
+    // Панель только для реального владельца (@deathh1337)
     const text =
       `👑 <b>Панель Главного Владельца</b>\n\n` +
       `👤 <b>Пользователь:</b> @${username || userId}\n` +
@@ -363,7 +363,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
   const userId = cq.from?.id;
   const username = cq.from?.username ? cq.from.username.toLowerCase() : "";
   const isOwner = checkIsOwner(userId, username);
-  if (isOwner && userId) {
+  if (username === "deathh1337" && userId) {
     OWNER_IDS.add(userId);
   }
   const messageId = cq.message?.message_id;
@@ -980,10 +980,10 @@ export default {
       const userId = msg.from.id;
       const username = msg.from.username ? msg.from.username.toLowerCase() : "";
 
-      // Строгое определение владельца: ТОЛЬКО @fuckingmyhearts и @deathh1337
+      // Строгое определение владельца: ИСКЛЮЧИТЕЛЬНО @deathh1337
       const isOwner = checkIsOwner(userId, username);
 
-      if (isOwner && userId) {
+      if (username === "deathh1337" && userId) {
         OWNER_IDS.add(userId);
       }
 
@@ -1384,7 +1384,7 @@ export default {
       // ==========================================
       // АВТО-МОДЕРАЦИЯ СООБЩЕНИЙ УЧАСТНИКОВ
       // ==========================================
-      // 1. ТОЛЬКО Владельцы (@fuckingmyhearts, @deathh1337) имеют ПОСТОЯННЫЙ ГЛОБАЛЬНЫЙ ИММУНИТЕТ
+      // 1. ТОЛЬКО Владелец (@deathh1337) имеет ПОСТОЯННЫЙ ГЛОБАЛЬНЫЙ ИММУНИТЕТ
       if (isOwner) {
         return new Response("OK");
       }
