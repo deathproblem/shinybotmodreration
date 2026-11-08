@@ -739,8 +739,8 @@ export default {
       if (msg.chat.type === "private") {
         const text = (msg.text || "").trim();
 
-        // 1. Команда /leave или /chats в ЛС: показывает список групп бота с кнопками выхода!
-        if (text === "/leave" || text === "/chats" || text === "/groups") {
+        // 1. Команда /leave или сообщение о выходе в ЛС
+        if (text === "/leave" || text === "/chats" || text === "/groups" || text.toLowerCase().includes("выйти") || text.includes("9А") || text.includes("9а")) {
           if (KNOWN_CHATS.size > 0) {
             const buttons = [];
             for (const [cId, title] of KNOWN_CHATS.entries()) {
@@ -757,10 +757,12 @@ export default {
           } else {
             await tgApi(token, "sendMessage", {
               chat_id: chatId,
-              text: "🚪 <b>Управление выходом из групп:</b>\n\n" +
-                    "Чтобы бот отобразил кнопку выхода из чата «9А»:\n" +
-                    "👉 <b>Перешлите сюда любое сообщение из чата 9А</b> (от любого участника или от бота).\n\n" +
-                    "<i>Бот мгновенно покажет интерактивную кнопку: [ 🚪 Выйти из 9А ]!</i>",
+              text: "🚪 <b>Чтобы бот вышел из чата 9А:</b>\n\n" +
+                    "Вы прислали обычный текст, но боту нужен ID группы. Для этого сделайте <b>пересылку (Forward)</b>:\n\n" +
+                    "1. Зайдите в чат <b>9А</b>;\n" +
+                    "2. Нажмите <b>правой кнопкой мыши</b> на любое сообщение в чате 9А $\\rightarrow$ нажмите <b>«Переслать» (Forward)</b>;\n" +
+                    "3. Выберите этого бота и отправьте сообщение;\n" +
+                    "4. Бот мгновенно пришлёт вам синюю кнопку <b>[ 🚪 Выйти из 9А ]</b>, нажмите на неё, и бот сразу выйдет!",
               parse_mode: "HTML"
             });
           }
