@@ -92,28 +92,23 @@ function hasLinks(msg) {
   const entities = (msg.entities || []).concat(msg.caption_entities || []);
   for (let e of entities) {
     if (e.type === "url" || e.type === "text_link") return true;
-    if (e.type === "mention") return true; // Блокировка тегов @каналов и @ботов
+    if (e.type === "mention") return true;
   }
 
   const text = msg.text || msg.caption || "";
 
-  // Протоколы и ссылки telegram
   if (/(?:https?:\/\/|ftps?:\/\/|tg:\/\/|t\.me\/|telegram\.me\/|telegram\.dog\/)/i.test(text)) {
     return true;
   }
 
-  // Расширенный список доменных зон интернета
   const domainRegex = /\b[a-z0-9-]{2,}\.(?:com|ru|org|net|xyz|top|online|site|pro|app|io|me|link|live|fun|vip|to|tv|cc|gg|su|kz|by|ua|info|biz|co|tech|space|club|shop|work|agency|dev|cloud|store|click|press|group|design|trade|wiki|monster|fit|icu|pw|rest|casa|buzz|best|ooo|cyou|cfd|art|lat|one|bar|sbs)\b/i;
   if (domainRegex.test(text)) return true;
 
-  // Замаскированные ссылки: domain[.]ru, domain(dot)com, domain точка ру, domain/com
   const obfuscatedRegex = /[a-z0-9-]{2,}\s*(?:\[\.\]|\(\.\)|\s+dot\s+|\s+точка\s+|\s*\/\s*)(?:com|ru|org|net|xyz|top|site|online|me|io)/i;
   if (obfuscatedRegex.test(text)) return true;
 
-  // Разреженные ссылки: "t . m e /" или "w w w ."
   if (/\b(?:t\s*\.\s*m\s*e|w\s*w\s*w)\b/i.test(text)) return true;
 
-  // Любые юзернеймы через @ в обычном тексте
   if (/(?:^|\s)@[a-zA-Z0-9_]{4,}/.test(text)) return true;
 
   return false;
@@ -167,7 +162,7 @@ function hasProfanity(text) {
   return false;
 }
 
-// 3. База стоп-фраз мошенников, спамеров и нежелательной рекламы (КАРА: БАН НАВСЕГДА)
+// 3. База стоп-фраз мошенников, спамеров и нежелательной рекламы
 const SCAM_PATTERNS = [
   /пассивн(?:ый|ого|ому|ом|ым)\s+доход/i,
   /заработ(?:ок|ать|ай|ывай|аем)/i,
@@ -251,13 +246,38 @@ async function tgApi(token, method, data) {
   });
 }
 
+// Проверка статуса администратора пользователя
 async function isAdmin(token, chatId, userId) {
   try {
     const res = await (await tgApi(token, "getChatMember", { chat_id: chatId, user_id: userId })).json();
-    return res.ok && (res.result.status === "creator" || res.result.status === "administrator");
-  } catch (e) {
-    return false;
-  }
+    if (res.ok) {
+      const s = res.result.status;
+      return s === "creator" || s === "administrator";
+    }
+  } catch (e) {}
+
+  try {
+    const adminsRes = await (await tgApi(token, "getChatAdministrators", { chat_id: chatId })).json();
+    if (adminsRes.ok && Array.isArray(adminsRes.result)) {
+      return adminsRes.result.some(a => a.user?.id === userId);
+    }
+  } catch (e) {}
+
+  return false;
+}
+
+// Проверка: является ли сам бот администратором группы
+async function checkBotIsAdmin(token, chatId) {
+  try {
+    const meRes = await (await tgApi(token, "getMe", {})).json();
+    if (!meRes.ok) return true;
+    const botId = meRes.result.id;
+    const res = await (await tgApi(token, "getChatMember", { chat_id: chatId, user_id: botId })).json();
+    if (res.ok) {
+      return res.result.status === "administrator";
+    }
+  } catch (e) {}
+  return true; // По умолчанию предполагаем True, если группа не поддерживает метод
 }
 
 // ==========================================
@@ -564,7 +584,11 @@ export default {
       }
 
       const chatId = msg.chat.id;
+      const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
       const chatSettings = await getChatSettings(env, chatId);
+
+      // Проверка: назначен ли бот администратором группы
+      const botIsAdmin = isGroup ? await checkBotIsAdmin(token, chatId) : true;
 
       // 🧹 Стерильность: Мгновенное авто-удаление системных сообщений
       if (msg.new_chat_members || msg.left_chat_member || msg.pinned_message) {
@@ -572,8 +596,29 @@ export default {
           await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
         }
 
-        // Анти-рейд: мгновенный БАН ботов со ссылками или рекламой в имени при входе
+        // Если бота только что добавили в группу — поприветствовать и напомнить дать права!
         if (msg.new_chat_members) {
+          let botId = null;
+          try {
+            const meRes = await (await tgApi(token, "getMe", {})).json();
+            if (meRes.ok) botId = meRes.result.id;
+          } catch (e) {}
+
+          const botWasAdded = botId && msg.new_chat_members.some(u => u.id === botId);
+          if (botWasAdded) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "🛡️ <b>Привет! Я бот-модератор ShinyModeration.</b>\n\n" +
+                    "⚠️ <b>ВАЖНО:</b> Чтобы я мог работать и защищать группу, <b>назначьте меня Администратором чата</b> с правами:\n" +
+                    "• ✅ <b>Удаление сообщений (Delete Messages)</b>\n" +
+                    "• ✅ <b>Блокировка пользователей (Ban/Restrict Users)</b>\n\n" +
+                    "После назначения администратором отправьте <code>/settings</code> для настройки фильтров!",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
+          // Анти-рейд: мгновенный БАН ботов со ссылками или рекламой в имени при входе
           for (let u of msg.new_chat_members) {
             const fullName = `${u.first_name || ""} ${u.last_name || ""}`;
             if (hasLinks({ text: fullName }) || checkScamOrPromo({ text: fullName })) {
@@ -621,7 +666,7 @@ export default {
           "• <code>/ban</code> — забанить навсегда\n" +
           "• <code>/del</code> — быстро удалить сообщение\n" +
           "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя\n\n" +
-          "<b>Как запустить:</b> добавьте бота в группу и назначьте <b>Администратором</b> с правами на удаление сообщений и блокировку пользователей.";
+          "<b>Как запустить:</b> добавьте бота в группу и обязательно назначьте <b>Администратором</b> с правами на удаление сообщений и блокировку пользователей.";
 
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
@@ -636,14 +681,80 @@ export default {
         return new Response("OK");
       }
 
-      // Администраторы чата имеют доступ к настройкам и иммунитет
-      if (await isAdmin(token, chatId, userId)) {
-        const text = (msg.text || "").trim();
-        const parts = text.split(/\s+/);
-        const cmd = parts[0].toLowerCase().replace(/@.+$/, '');
+      // ==========================================
+      // ОБРАБОТКА КОМАНД В ГРУППЕ
+      // ==========================================
+      const text = (msg.text || msg.caption || "").trim();
+      const parts = text.split(/\s+/);
+      const cmd = parts[0].toLowerCase().replace(/@.+$/, '');
 
-        // Открытие интерактивной панели настроек
+      if (cmd.startsWith("/")) {
+        // Команда /start и /help всегда отвечает в группе всем участникам
+        if (cmd === "/start" || cmd === "/help") {
+          const statusText = botIsAdmin 
+            ? "✅ Бот назначен Администратором (Модерация активна)" 
+            : "⚠️ Бот еще НЕ назначен Администратором (Выдайте права!)";
+
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🛡️ <b>Бот-модератор ShinyModeration активен!</b>\n\n` +
+                  `📊 Статус бота: <b>${statusText}</b>\n\n` +
+                  `<b>Команды:</b>\n` +
+                  `• <code>/settings</code> — открыть панель настройки фильтров и мутов\n` +
+                  `• <code>/rules</code> — правила чата\n` +
+                  `• <code>/mute 30m / 2h / 1d</code> — замутить нарушителя (ответом)\n` +
+                  `• <code>/unmute</code> — снять мут (ответом)\n` +
+                  `• <code>/kick</code> — выгнать из группы (ответом)\n` +
+                  `• <code>/ban</code> — забанить навсегда (ответом)\n` +
+                  `• <code>/del</code> — быстро удалить сообщение (ответом)\n` +
+                  `• <code>/unban &lt;ID&gt;</code> — разбанить по ID\n\n` +
+                  `<i>Панель /settings доступна только администраторам чата.</i>`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Команда /rules доступна всем участникам
+        if (cmd === "/rules") {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА:</b>\n\n" +
+                  "1. 🚨 <b>Спам, реклама, криптовалюты и схемы заработка</b> — перманентный бан.\n" +
+                  `2. 🔗 <b>Ссылки и сторонние теги</b> — ${chatSettings.enable_links ? `мут на ${formatDuration(chatSettings.mute_links_sec)}` : 'разрешены'}.\n` +
+                  `3. 🤬 <b>Нецензурная брань и оскорбления</b> — ${chatSettings.enable_profanity ? `мут на ${formatDuration(chatSettings.mute_profanity_sec)}` : 'разрешены'}.\n` +
+                  `4. 📢 <b>Капслок и флуд</b> — ${chatSettings.enable_caps ? `мут на ${formatDuration(chatSettings.mute_caps_sec)}` : 'разрешены'}.\n\n` +
+                  "<i>Бот модерирует группу в реальном времени. Нарушения удаляются автоматически.</i>",
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Проверяем: назначен ли бот админом для работы с остальными командами
+        if (!botIsAdmin) {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "⚠️ <b>У бота нет прав Администратора в этой группе!</b>\n\n" +
+                  "Чтобы команды и модерация заработали:\n" +
+                  "1. Нажмите на название чата $\\rightarrow$ <b>Администраторы</b> $\\rightarrow$ <b>Добавить администратора</b>.\n" +
+                  "2. Выберите бота и дайте права: <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.",
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
+        // Проверяем статус администратора у отправителя команды
+        const userIsAdmin = await isAdmin(token, chatId, userId);
+
         if (cmd === "/settings" || cmd === "/config") {
+          if (!userIsAdmin) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ <b>Панель настроек /settings доступна только администраторам группы!</b>",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
           const payload = renderMainMenu(chatId, msg.chat.title, chatSettings);
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
@@ -654,7 +765,12 @@ export default {
           return new Response("OK");
         }
 
-        // Быстрая настройка мутов командой: /setmute links 12h / /setmute profanity 1h / /setmute caps 30m
+        // Если пользователь не админ, игнорируем остальные команды модерации
+        if (!userIsAdmin) {
+          return new Response("OK");
+        }
+
+        // Быстрая настройка мутов командой: /setmute links 12h
         if (cmd === "/setmute") {
           const target = (parts[1] || "").toLowerCase();
           const durationStr = parts[2] || "";
@@ -760,42 +876,6 @@ export default {
             });
             return new Response("OK");
           }
-        }
-
-        if (cmd === "/start" || cmd === "/help") {
-          await tgApi(token, "sendMessage", {
-            chat_id: chatId,
-            text: "🛡️ <b>Бот-модератор активен!</b>\n\n" +
-                  "<b>Управление настройками:</b>\n" +
-                  "• <code>/settings</code> — открыть панель настройки фильтров и мутов\n" +
-                  "• <code>/setmute links 12h</code> — настроить мут за ссылки\n" +
-                  "• <code>/setmute prof 2h</code> — настроить мут за мат\n" +
-                  "• <code>/setmute caps 15m</code> — настроить мут за капс\n\n" +
-                  "<b>Команды модерации (ответом на сообщение):</b>\n" +
-                  "• <code>/rules</code> — показать правила чата\n" +
-                  "• <code>/mute 30m / 2h / 1d</code> — замутить нарушителя\n" +
-                  "• <code>/unmute</code> — снять мут\n" +
-                  "• <code>/kick</code> — выгнать из группы\n" +
-                  "• <code>/ban</code> — забанить навсегда\n" +
-                  "• <code>/del</code> — быстро удалить сообщение\n" +
-                  "• <code>/unban &lt;ID&gt;</code> — разбанить по ID",
-            parse_mode: "HTML"
-          });
-          return new Response("OK");
-        }
-
-        if (cmd === "/rules") {
-          await tgApi(token, "sendMessage", {
-            chat_id: chatId,
-            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА:</b>\n\n" +
-                  "1. 🚨 <b>Спам, реклама, криптовалюты и схемы заработка</b> — перманентный бан.\n" +
-                  `2. 🔗 <b>Ссылки и сторонние теги</b> — ${chatSettings.enable_links ? `мут на ${formatDuration(chatSettings.mute_links_sec)}` : 'разрешены'}.\n` +
-                  `3. 🤬 <b>Нецензурная брань и оскорбления</b> — ${chatSettings.enable_profanity ? `мут на ${formatDuration(chatSettings.mute_profanity_sec)}` : 'разрешены'}.\n` +
-                  `4. 📢 <b>Капслок и флуд</b> — ${chatSettings.enable_caps ? `мут на ${formatDuration(chatSettings.mute_caps_sec)}` : 'разрешены'}.\n\n` +
-                  "<i>Бот модерирует группу в реальном времени. Нарушения удаляются автоматически.</i>",
-            parse_mode: "HTML"
-          });
-          return new Response("OK");
         }
 
         if (cmd === "/del") {
@@ -954,8 +1034,17 @@ export default {
 
       // ==========================================
       // МОДЕРАЦИЯ СООБЩЕНИЙ ПО НАСТРОЙКАМ ЧАТА
+      // (Только если бот является администратором и отправитель не админ)
       // ==========================================
-      const text = msg.text || msg.caption || "";
+      if (!botIsAdmin) {
+        return new Response("OK");
+      }
+
+      const senderIsAdmin = await isAdmin(token, chatId, userId);
+      if (senderIsAdmin) {
+        return new Response("OK");
+      }
+
       const mention = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
 
       // 1. ПРОВЕРКА НА СПАМ, СКАМ, РЕКЛАМУ И КРИПТУ -> БАН НАВСЕГДА
