@@ -1,23 +1,68 @@
 // Cloudflare Worker: Telegram Moderator Bot (ShinyModeration)
-// High-tech, удобный бот-модератор с поддержкой кнопок, естественных команд и авто-размута
+// Ультимативный, удобный и быстрый бот-модератор для групп с интерактивным личным кабинетом в ЛС
 
 // Настройки по умолчанию
 const DEFAULT_SETTINGS = {
-  enable_links: true,        // Блокировка рекламы и ссылок
+  enable_links: true,        // Блокировка ссылок и рекламы
   enable_profanity: false,   // Маты отключены (по умолчанию не мутить)
   enable_spam: true,         // Блокировка скама/крипты/заработка
   enable_caps: false,        // Капс отключен (по умолчанию не мутить)
-  clean_service: false,      // Чистка входов/выходов
+  clean_service: false,      // Чистка сервисных сообщений (вход/выход)
   max_caps_percent: 85,
   auto_delete_sec: 5,        // Быстрое исчезновение алертов (5 сек)
   mute_links_sec: 86400,     // 24 часа
-  mute_profanity_sec: 7200,
-  mute_caps_sec: 900
+  mute_profanity_sec: 7200,  // 2 часа
+  mute_caps_sec: 900         // 15 минут
 };
 
-// Хранилище настроек и известных чатов
+// Хранилище настроек, известных чатов и ID владельцев
 const CHAT_SETTINGS = new Map();
 const KNOWN_CHATS = new Map();
+const OWNER_IDS = new Set();
+
+// Предзагрузка известных чатов из кэша Cloudflare Edge
+async function loadCacheState() {
+  try {
+    const cache = caches.default;
+    const req = new Request("https://shiny-storage.internal/state");
+    const res = await cache.match(req);
+    if (res) {
+      const data = await res.json();
+      if (data.chats) {
+        for (const [id, title] of Object.entries(data.chats)) {
+          KNOWN_CHATS.set(parseInt(id, 10), title);
+        }
+      }
+      if (data.settings) {
+        for (const [id, s] of Object.entries(data.settings)) {
+          CHAT_SETTINGS.set(parseInt(id, 10), s);
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+async function saveCacheState(ctx) {
+  try {
+    const cache = caches.default;
+    const req = new Request("https://shiny-storage.internal/state");
+    const data = {
+      chats: Object.fromEntries(KNOWN_CHATS),
+      settings: Object.fromEntries(CHAT_SETTINGS)
+    };
+    const res = new Response(JSON.stringify(data), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "max-age=2592000"
+      }
+    });
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(cache.put(req, res));
+    } else {
+      await cache.put(req, res);
+    }
+  } catch (e) {}
+}
 
 async function getChatSettings(env, chatId) {
   const key = `settings_${chatId}`;
@@ -33,7 +78,7 @@ async function getChatSettings(env, chatId) {
   return { ...DEFAULT_SETTINGS };
 }
 
-async function saveChatSettings(env, chatId, newSettings) {
+async function saveChatSettings(env, ctx, chatId, newSettings) {
   const merged = { ...DEFAULT_SETTINGS, ...newSettings };
   CHAT_SETTINGS.set(chatId, merged);
   if (env?.SETTINGS_KV) {
@@ -41,6 +86,7 @@ async function saveChatSettings(env, chatId, newSettings) {
       await env.SETTINGS_KV.put(`settings_${chatId}`, JSON.stringify(merged));
     } catch (e) {}
   }
+  await saveCacheState(ctx);
   return merged;
 }
 
@@ -132,6 +178,7 @@ function checkScamOrPromo(msg) {
   return null;
 }
 
+// Запросы к Telegram API
 async function tgApi(token, method, data) {
   return await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
@@ -160,31 +207,16 @@ async function isAdmin(token, chatId, userId) {
   return false;
 }
 
-// Проверка: является ли сам бот админом
-async function checkBotIsAdmin(token, chatId) {
-  try {
-    const meRes = await (await tgApi(token, "getMe", {})).json();
-    if (!meRes.ok) return true;
-    const botId = meRes.result.id;
-    const res = await (await tgApi(token, "getChatMember", { chat_id: chatId, user_id: botId })).json();
-    if (res.ok) {
-      return res.result.status === "administrator";
-    }
-  } catch (e) {}
-  return true;
-}
-
-// Главное меню в ЛС (Личный кабинет администратора)
+// Главный личный кабинет в ЛС
 function renderDashboard(userId, username) {
   const botUsername = "shinymoderation_bot";
-  // Ссылка для добавления в группу с предвыбранными правами администратора
   const addUrl = `https://t.me/${botUsername}?startgroup=true&admin=delete_messages+restrict_members`;
 
   const text =
     `🛡️ <b>Личный кабинет ShinyModeration</b>\n\n` +
     `👤 <b>Пользователь:</b> @${username || userId}\n` +
     `⚡ <b>Статус:</b> Владелец / Администратор (Иммунитет активен)\n\n` +
-    `<i>Выберите нужное действие кнопками ниже:</i>`;
+    `<i>Выберите нужное действие:</i>`;
 
   const reply_markup = {
     inline_keyboard: [
@@ -192,11 +224,11 @@ function renderDashboard(userId, username) {
         { text: "➕ Добавить в группу (с правами)", url: addUrl }
       ],
       [
-        { text: "🔊 Снять с меня мут", callback_data: "act_unmuteme" },
-        { text: "🚪 Выйти из группы", callback_data: "act_leave_menu" }
+        { text: "⚙️ Настройки модерации", callback_data: "act_settings_menu" },
+        { text: "🔊 Снять с меня мут", callback_data: "act_unmuteme" }
       ],
       [
-        { text: "⚙️ Настройки модерации", callback_data: "act_settings_help" },
+        { text: "🚪 Выйти из группы", callback_data: "act_leave_menu" },
         { text: "📖 Список команд", callback_data: "act_commands_help" }
       ]
     ]
@@ -205,44 +237,58 @@ function renderDashboard(userId, username) {
   return { text, reply_markup };
 }
 
-// Панель настроек чата
-function renderMainMenu(chatId, chatTitle, s) {
+// Панель настроек модерации для конкретного чата (используется и в группе, и в ЛС)
+function renderChatSettingsPanel(chatId, chatTitle, s, isPm = false) {
   const text =
-    `⚙️ <b>Настройки модератора для чата:</b>\n` +
-    `📍 <b>${chatTitle || "Этот чат"}</b>\n\n` +
-    `🔗 <b>Ссылки и юзернеймы:</b> ${s.enable_links ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Мут: <b>${formatDuration(s.mute_links_sec)}</b>)\n` +
-    `🚨 <b>Анти-скам / реклама:</b> ${s.enable_spam ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Кара: <b>БАН</b>)\n` +
-    `🤬 <b>Мат:</b> ${s.enable_profanity ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n` +
-    `📢 <b>Капслок:</b> ${s.enable_caps ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n` +
-    `🧹 <b>Удаление входов/выходов:</b> ${s.clean_service ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n\n` +
-    `<i>Нажмите на кнопку, чтобы включить/выключить:</i>`;
+    `⚙️ <b>Настройки модератора для группы:</b>\n` +
+    `📍 <b>${chatTitle || "Этот чат"}</b> (ID: <code>${chatId}</code>)\n\n` +
+    `🔗 <b>Ссылки и реклама:</b> ${s.enable_links ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Мут: <b>${formatDuration(s.mute_links_sec)}</b>)\n` +
+    `🚨 <b>Анти-скам / крипта:</b> ${s.enable_spam ? '✅ ВКЛ' : '❌ ВЫКЛ'} (Кара: <b>БАН</b>)\n` +
+    `🤬 <b>Анти-мат:</b> ${s.enable_profanity ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n` +
+    `📢 <b>Анти-капс:</b> ${s.enable_caps ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n` +
+    `🧹 <b>Чистка сервисных:</b> ${s.clean_service ? '✅ ВКЛ' : '❌ ВЫКЛ'}\n\n` +
+    `<i>Нажмите на кнопку, чтобы мгновенно переключить:</i>`;
 
-  const reply_markup = {
-    inline_keyboard: [
-      [
-        { text: s.enable_links ? "🔗 Ссылки: ВКЛ" : "🔗 Ссылки: ВЫКЛ", callback_data: "cfg_toggle_links" },
-        { text: `⏱️ Мут: ${formatDuration(s.mute_links_sec)}`, callback_data: "cfg_menu_links" }
-      ],
-      [
-        { text: s.enable_spam ? "🚨 Скам: ВКЛ" : "🚨 Скам: ВЫКЛ", callback_data: "cfg_toggle_spam" },
-        { text: s.clean_service ? "🧹 Чистка: ВКЛ" : "🧹 Чистка: ВЫКЛ", callback_data: "cfg_toggle_service" }
-      ],
-      [
-        { text: s.enable_profanity ? "🤬 Мат: ВКЛ" : "🤬 Мат: ВЫКЛ", callback_data: "cfg_toggle_prof" },
-        { text: s.enable_caps ? "📢 Капс: ВКЛ" : "📢 Капс: ВЫКЛ", callback_data: "cfg_toggle_caps" }
-      ],
-      [
-        { text: "🔄 Сброс настроек", callback_data: "cfg_reset" },
-        { text: "❌ Закрыть", callback_data: "cfg_close" }
-      ]
+  const prefix = isPm ? `pm_cfg_${chatId}_` : "cfg_";
+
+  const buttons = [
+    [
+      { text: s.enable_links ? "🔗 Ссылки: ВКЛ" : "🔗 Ссылки: ВЫКЛ", callback_data: `${prefix}toggle_links` },
+      { text: `⏱️ Мут: ${formatDuration(s.mute_links_sec)}`, callback_data: `${prefix}menu_links` }
+    ],
+    [
+      { text: s.enable_spam ? "🚨 Скам: ВКЛ" : "🚨 Скам: ВЫКЛ", callback_data: `${prefix}toggle_spam` },
+      { text: s.clean_service ? "🧹 Чистка: ВКЛ" : "🧹 Чистка: ВЫКЛ", callback_data: `${prefix}toggle_service` }
+    ],
+    [
+      { text: s.enable_profanity ? "🤬 Мат: ВКЛ" : "🤬 Мат: ВЫКЛ", callback_data: `${prefix}toggle_prof` },
+      { text: s.enable_caps ? "📢 Капс: ВКЛ" : "📢 Капс: ВЫКЛ", callback_data: `${prefix}toggle_caps` }
     ]
-  };
+  ];
 
-  return { text, reply_markup };
+  if (isPm) {
+    buttons.push([
+      { text: `🔊 Снять мут в чате`, callback_data: `unmute_chat_${chatId}` },
+      { text: `🚪 Выйти из чата`, callback_data: `leave_chat_${chatId}` }
+    ]);
+    buttons.push([
+      { text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }
+    ]);
+  } else {
+    buttons.push([
+      { text: "🔄 Сброс", callback_data: "cfg_reset" },
+      { text: "❌ Закрыть панель", callback_data: "cfg_close" }
+    ]);
+  }
+
+  return { text, reply_markup: { inline_keyboard: buttons } };
 }
 
-// Подменю выбора длительности мута за ссылки
-function renderMuteLinksMenu(s) {
+// Меню выбора длительности мута за ссылки
+function renderMuteLinksMenu(s, chatId, isPm = false) {
+  const prefix = isPm ? `pm_cfg_${chatId}_` : "cfg_";
+  const backCallback = isPm ? `pm_cfg_chat_${chatId}` : "cfg_main";
+
   const text =
     `⏱️ <b>Длительность мута за ссылки:</b>\n` +
     `Текущее значение: <b>${formatDuration(s.mute_links_sec)}</b>\n\n` +
@@ -251,33 +297,35 @@ function renderMuteLinksMenu(s) {
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: "15 минут", callback_data: "cfg_set_links_900" },
-        { text: "1 час", callback_data: "cfg_set_links_3600" },
-        { text: "6 часов", callback_data: "cfg_set_links_21600" }
+        { text: "15 мин", callback_data: `${prefix}set_links_900` },
+        { text: "1 час", callback_data: `${prefix}set_links_3600` },
+        { text: "6 часов", callback_data: `${prefix}set_links_21600` }
       ],
       [
-        { text: "12 часов", callback_data: "cfg_set_links_43200" },
-        { text: "24 часа (1 д)", callback_data: "cfg_set_links_86400" },
-        { text: "7 дней", callback_data: "cfg_set_links_604800" }
+        { text: "12 часов", callback_data: `${prefix}set_links_43200` },
+        { text: "24 часа (1 д)", callback_data: `${prefix}set_links_86400` },
+        { text: "7 дней", callback_data: `${prefix}set_links_604800` }
       ],
       [
-        { text: "⬅️ Назад в меню", callback_data: "cfg_main" }
+        { text: "⬅️ Назад к настройкам", callback_data: backCallback }
       ]
     ]
   };
   return { text, reply_markup };
 }
 
-// Обработка кликов по инлайн-кнопкам
-async function handleCallbackQuery(token, env, cq) {
+// Обработка инлайн-кнопок
+async function handleCallbackQuery(token, env, ctx, cq) {
   const chatId = cq.message?.chat?.id;
   const userId = cq.from?.id;
+  const username = cq.from?.username ? cq.from.username.toLowerCase() : "";
+  const isOwner = username === "deathh1337" || username === "fuckingmyhearts" || OWNER_IDS.has(userId);
   const messageId = cq.message?.message_id;
   const data = cq.data || "";
 
   if (!chatId || !userId) return new Response("OK");
 
-  // 1. Кнопка "Снять с меня мут" в личном кабинете
+  // 1. Снять с меня мут
   if (data === "act_unmuteme") {
     let unmutedCount = 0;
     for (const [cId, title] of KNOWN_CHATS.entries()) {
@@ -298,15 +346,31 @@ async function handleCallbackQuery(token, env, cq) {
         unmutedCount++;
       } catch (e) {}
     }
+
+    const alertMsg = unmutedCount > 0
+      ? `🔊 Мут снят в ${unmutedCount} группах! Вы можете писать сообщения.`
+      : "🔊 Мут снят! Если вы ограничены в группе, перешлите любое сообщение из неё боту.";
+
     await tgApi(token, "answerCallbackQuery", {
       callback_query_id: cq.id,
-      text: unmutedCount > 0 ? `🔊 Мут снят в ${unmutedCount} группах!` : "🔊 Мут снят!",
+      text: alertMsg,
       show_alert: true
     });
+
+    if (cq.message?.chat?.type === "private") {
+      const dash = renderDashboard(userId, cq.from?.username);
+      await tgApi(token, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `🔊 <b>Мут успешно снят!</b>\nВсе ограничения на отправку сообщений и медиа сняты.\n\n` + dash.text,
+        parse_mode: "HTML",
+        reply_markup: dash.reply_markup
+      });
+    }
     return new Response("OK");
   }
 
-  // 2. Кнопка "Выйти из группы" в личном кабинете
+  // 2. Меню "Выйти из группы"
   if (data === "act_leave_menu") {
     if (KNOWN_CHATS.size > 0) {
       const buttons = [];
@@ -318,7 +382,9 @@ async function handleCallbackQuery(token, env, cq) {
       await tgApi(token, "editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: "🚪 <b>Выберите группу, из которой боту нужно выйти:</b>",
+        text:
+          "🚪 <b>Выберите группу, из которой боту нужно выйти:</b>\n\n" +
+          "<i>💡 Вы также можете просто написать «выйди» прямо в самом чате группы!</i>",
         parse_mode: "HTML",
         reply_markup: { inline_keyboard: buttons }
       });
@@ -326,10 +392,10 @@ async function handleCallbackQuery(token, env, cq) {
       await tgApi(token, "editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: "🚪 <b>Управление выходом из групп:</b>\n\n" +
-              "Чтобы бот вышел из группы (например, «9А»):\n" +
-              "👉 <b>Просто перешлите любое сообщение из этой группы сюда в ЛС!</b>\n\n" +
-              "<i>Бот сразу отобразит кнопку подтверждения выхода.</i>",
+        text:
+          "🚪 <b>Как попросить бота выйти из группы:</b>\n\n" +
+          "1️⃣ <b>Самый простой способ:</b> Напишите в самом чате (например, «9А») слово: <code>выйди</code> — бот сразу выйдет!\n\n" +
+          "2️⃣ <b>Либо перешлите сюда</b> любое сообщение из этой группы — появится кнопка выхода в один клик.",
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [[{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]]
@@ -340,68 +406,133 @@ async function handleCallbackQuery(token, env, cq) {
     return new Response("OK");
   }
 
-  // Возврат в кабинет
-  if (data === "act_back_dashboard") {
-    const dash = renderDashboard(userId, cq.from?.username);
-    await tgApi(token, "editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text: dash.text,
-      parse_mode: "HTML",
-      reply_markup: dash.reply_markup
-    });
-    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
-    return new Response("OK");
-  }
-
-  // Справка по командам
-  if (data === "act_commands_help") {
-    const helpText =
-      "📖 <b>Быстрые команды для чата (ответом на сообщение нарушителя):</b>\n\n" +
-      "• <code>мут 30м</code> или <code>/mute 30m</code> — замутить\n" +
-      "• <code>размут</code> или <code>/unmute</code> — снять мут\n" +
-      "• <code>кик</code> или <code>/kick</code> — выгнать из группы\n" +
-      "• <code>бан</code> или <code>/ban</code> — забанить навсегда\n" +
-      "• <code>дел</code> или <code>/del</code> — удалить сообщение\n" +
-      "• <code>выйди</code> или <code>/leave</code> — бот выйдет из чата\n" +
-      "• <code>/settings</code> — открыть панель настроек\n\n" +
-      "<i>Бот понимает команды как со слешем (/), так и обычными русскими словами!</i>";
-
-    await tgApi(token, "editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text: helpText,
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [[{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]]
+  // 3. Меню "Настройки модерации" в ЛС
+  if (data === "act_settings_menu") {
+    if (KNOWN_CHATS.size === 1) {
+      // Если чат один, сразу открываем его настройки
+      const [onlyChatId, onlyTitle] = Array.from(KNOWN_CHATS.entries())[0];
+      const settings = await getChatSettings(env, onlyChatId);
+      const payload = renderChatSettingsPanel(onlyChatId, onlyTitle, settings, true);
+      await tgApi(token, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: payload.text,
+        parse_mode: "HTML",
+        reply_markup: payload.reply_markup
+      });
+    } else if (KNOWN_CHATS.size > 1) {
+      const buttons = [];
+      for (const [cId, title] of KNOWN_CHATS.entries()) {
+        buttons.push([{ text: `📍 ${title}`, callback_data: `pm_cfg_chat_${cId}` }]);
       }
+      buttons.push([{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]);
+
+      await tgApi(token, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: "⚙️ <b>Выберите группу для настройки фильтров:</b>",
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: buttons }
+      });
+    } else {
+      await tgApi(token, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text:
+          "⚙️ <b>Настройки модерации групп</b>\n\n" +
+          "У вас пока нет сохраненных групп.\n\n" +
+          "<b>Как подключить группу:</b>\n" +
+          "1. Добавьте бота в чат и сделайте Администратором.\n" +
+          "2. Либо просто <b>перешлите сюда любое сообщение</b> из группы!\n\n" +
+          "<i>После этого вы сможете включать/выключать фильтры прямо отсюда.</i>",
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "➕ Добавить в группу", url: "https://t.me/shinymoderation_bot?startgroup=true&admin=delete_messages+restrict_members" }],
+            [{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]
+          ]
+        }
+      });
+    }
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+    return new Response("OK");
+  }
+
+  // 4. Открытие настроек конкретного чата из ЛС
+  if (data.startsWith("pm_cfg_chat_")) {
+    const targetChatId = parseInt(data.replace("pm_cfg_chat_", ""), 10);
+    const title = KNOWN_CHATS.get(targetChatId) || `Чат ${targetChatId}`;
+    const settings = await getChatSettings(env, targetChatId);
+    const payload = renderChatSettingsPanel(targetChatId, title, settings, true);
+    await tgApi(token, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: payload.text,
+      parse_mode: "HTML",
+      reply_markup: payload.reply_markup
     });
     await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
     return new Response("OK");
   }
 
-  // Справка по настройкам
-  if (data === "act_settings_help") {
-    const text =
-      "⚙️ <b>Как настраивать бота:</b>\n\n" +
-      "1. Добавьте бота в нужную группу и назначьте Администратором.\n" +
-      "2. Напишите прямо в группе команду <code>/settings</code>.\n" +
-      "3. Появится удобное меню с кнопками для включения/выключения ссылок, спама, мата и изменения времени мута!";
+  // 5. Обработка переключателей настроек из ЛС (pm_cfg_<chatId>_<action>)
+  if (data.startsWith("pm_cfg_")) {
+    const parts = data.replace("pm_cfg_", "").split("_");
+    const targetChatId = parseInt(parts[0], 10);
+    const action = parts.slice(1).join("_");
+    const settings = await getChatSettings(env, targetChatId);
+    const title = KNOWN_CHATS.get(targetChatId) || `Чат ${targetChatId}`;
+
+    let changed = false;
+    let showLinksMenu = false;
+
+    if (action === "toggle_links") {
+      settings.enable_links = !settings.enable_links;
+      changed = true;
+    } else if (action === "toggle_spam") {
+      settings.enable_spam = !settings.enable_spam;
+      changed = true;
+    } else if (action === "toggle_prof") {
+      settings.enable_profanity = !settings.enable_profanity;
+      changed = true;
+    } else if (action === "toggle_caps") {
+      settings.enable_caps = !settings.enable_caps;
+      changed = true;
+    } else if (action === "toggle_service") {
+      settings.clean_service = !settings.clean_service;
+      changed = true;
+    } else if (action === "menu_links") {
+      showLinksMenu = true;
+    } else if (action.startsWith("set_links_")) {
+      settings.mute_links_sec = parseInt(action.replace("set_links_", ""), 10);
+      changed = true;
+    }
+
+    if (changed) {
+      await saveChatSettings(env, ctx, targetChatId, settings);
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "✅ Сохранено!" });
+    } else {
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+    }
+
+    let payload;
+    if (showLinksMenu) {
+      payload = renderMuteLinksMenu(settings, targetChatId, true);
+    } else {
+      payload = renderChatSettingsPanel(targetChatId, title, settings, true);
+    }
 
     await tgApi(token, "editMessageText", {
       chat_id: chatId,
       message_id: messageId,
-      text: text,
+      text: payload.text,
       parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [[{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]]
-      }
+      reply_markup: payload.reply_markup
     });
-    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
     return new Response("OK");
   }
 
-  // Выход из чата по кнопке
+  // 6. Выход из группы по кнопке
   if (data.startsWith("leave_chat_")) {
     const targetChatId = data.replace("leave_chat_", "");
     try {
@@ -409,11 +540,12 @@ async function handleCallbackQuery(token, env, cq) {
       const resData = await res.json();
       if (resData.ok) {
         KNOWN_CHATS.delete(parseInt(targetChatId, 10));
+        await saveCacheState(ctx);
         await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "✅ Бот покинул чат!" });
         await tgApi(token, "editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: `🚪 <b>Бот успешно покинул чат (ID: <code>${targetChatId}</code>)!</b>`,
+          text: `🚪 <b>Бот успешно покинул группу (ID: <code>${targetChatId}</code>)!</b>`,
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [[{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]]
@@ -428,7 +560,7 @@ async function handleCallbackQuery(token, env, cq) {
     return new Response("OK");
   }
 
-  // Размут по кнопке
+  // 7. Размут в конкретном чате по кнопке
   if (data.startsWith("unmute_chat_")) {
     const targetChatId = data.replace("unmute_chat_", "");
     try {
@@ -461,17 +593,58 @@ async function handleCallbackQuery(token, env, cq) {
     return new Response("OK");
   }
 
+  // 8. Возврат в кабинет
+  if (data === "act_back_dashboard") {
+    const dash = renderDashboard(userId, cq.from?.username);
+    await tgApi(token, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: dash.text,
+      parse_mode: "HTML",
+      reply_markup: dash.reply_markup
+    });
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+    return new Response("OK");
+  }
+
+  // 9. Справка по командам
+  if (data === "act_commands_help") {
+    const helpText =
+      "📖 <b>Команды модератора (ответом на сообщение нарушителя):</b>\n\n" +
+      "• <code>мут 30м</code> или <code>/mute 30m</code> — замутить\n" +
+      "• <code>размут</code> или <code>/unmute</code> — снять ограничения\n" +
+      "• <code>кик</code> или <code>/kick</code> — выгнать из группы\n" +
+      "• <code>бан</code> или <code>/ban</code> — заблокировать навсегда\n" +
+      "• <code>дел</code> или <code>/del</code> — быстро удалить спам\n" +
+      "• <code>выйди</code> или <code>/leave</code> — бот выйдет из группы\n" +
+      "• <code>/settings</code> — открыть меню настроек\n\n" +
+      "<i>Бот понимает как английские команды со слешем (/), так и обычные русские слова!</i>";
+
+    await tgApi(token, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: helpText,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[{ text: "⬅️ Назад в кабинет", callback_data: "act_back_dashboard" }]]
+      }
+    });
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+    return new Response("OK");
+  }
+
+  // 10. Кнопка "Закрыть" меню настроек в группе
   if (data === "cfg_close") {
     await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: messageId });
     await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Панель закрыта" });
     return new Response("OK");
   }
 
-  // Проверка прав администратора для настроек в группе
-  if (!await isAdmin(token, chatId, userId)) {
+  // 11. Настройки внутри группы: проверка прав администратора
+  if (!isOwner && !await isAdmin(token, chatId, userId)) {
     await tgApi(token, "answerCallbackQuery", {
       callback_query_id: cq.id,
-      text: "❌ Только администраторы могут менять настройки модерации!",
+      text: "❌ Только администраторы группы могут менять настройки!",
       show_alert: true
     });
     return new Response("OK");
@@ -481,16 +654,29 @@ async function handleCallbackQuery(token, env, cq) {
   let changed = false;
   let subMenu = null;
 
-  if (data === "cfg_reset") {
-    await saveChatSettings(env, chatId, DEFAULT_SETTINGS);
-    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Настройки сброшены!" });
-    const { text, reply_markup } = renderMainMenu(chatId, cq.message?.chat?.title, DEFAULT_SETTINGS);
+  if (data === "cfg_main") {
+    const payload = renderChatSettingsPanel(chatId, cq.message?.chat?.title, settings, false);
     await tgApi(token, "editMessageText", {
       chat_id: chatId,
       message_id: messageId,
-      text,
+      text: payload.text,
       parse_mode: "HTML",
-      reply_markup
+      reply_markup: payload.reply_markup
+    });
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
+    return new Response("OK");
+  }
+
+  if (data === "cfg_reset") {
+    await saveChatSettings(env, ctx, chatId, DEFAULT_SETTINGS);
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Настройки сброшены!" });
+    const payload = renderChatSettingsPanel(chatId, cq.message?.chat?.title, DEFAULT_SETTINGS, false);
+    await tgApi(token, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: payload.text,
+      parse_mode: "HTML",
+      reply_markup: payload.reply_markup
     });
     return new Response("OK");
   }
@@ -518,7 +704,7 @@ async function handleCallbackQuery(token, env, cq) {
   }
 
   if (changed) {
-    await saveChatSettings(env, chatId, settings);
+    await saveChatSettings(env, ctx, chatId, settings);
     await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "✅ Сохранено!" });
   } else {
     await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id });
@@ -527,9 +713,9 @@ async function handleCallbackQuery(token, env, cq) {
   const chatTitle = cq.message?.chat?.title || "Этот чат";
   let payload;
   if (subMenu === "links") {
-    payload = renderMuteLinksMenu(settings);
+    payload = renderMuteLinksMenu(settings, chatId, false);
   } else {
-    payload = renderMainMenu(chatId, chatTitle, settings);
+    payload = renderChatSettingsPanel(chatId, chatTitle, settings, false);
   }
 
   await tgApi(token, "editMessageText", {
@@ -547,6 +733,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
+
+    // Инициализация кэша
+    await loadCacheState();
 
     if (url.pathname === "/set-webhook") {
       const webhookUrl = `${url.origin}/`;
@@ -573,11 +762,21 @@ export default {
       });
     }
 
+    if (url.pathname === "/debug-chats") {
+      return new Response(JSON.stringify({
+        known_chats: Object.fromEntries(KNOWN_CHATS),
+        owner_ids: Array.from(OWNER_IDS)
+      }, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/set-commands") {
       const commands = [
         { command: "start", description: "Личный кабинет / Информация" },
         { command: "settings", description: "Настройки модератора и мутов" },
         { command: "rules", description: "Показать правила чата" },
+        { command: "help", description: "Помощь по командам" },
         { command: "mute", description: "Замутить (ответом: /mute 30m / 2h / 1d)" },
         { command: "unmute", description: "Снять мут с пользователя (ответом)" },
         { command: "kick", description: "Выгнать пользователя из группы (ответом)" },
@@ -593,15 +792,15 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return new Response("ShinyModeration Bot is active!", { status: 200 });
+      return new Response("ShinyModeration Bot is active and healthy!", { status: 200 });
     }
 
     try {
       const update = await request.json();
 
-      // Обработка кликов по инлайн-кнопкам
+      // 1. Обработка кликов по инлайн-кнопкам
       if (update.callback_query) {
-        return await handleCallbackQuery(token, env, update.callback_query);
+        return await handleCallbackQuery(token, env, ctx, update.callback_query);
       }
 
       const msg = update.message;
@@ -614,6 +813,7 @@ export default {
 
       if (isGroup) {
         KNOWN_CHATS.set(chatId, msg.chat.title || `Чат ${chatId}`);
+        await saveCacheState(ctx);
       }
 
       const chatSettings = await getChatSettings(env, chatId);
@@ -624,8 +824,50 @@ export default {
         chatSettings.enable_caps = false;
       }
 
-      // Чистка системных уведомлений (вход/выход)
-      if (msg.new_chat_members || msg.left_chat_member || msg.pinned_message) {
+      // Приветствие при добавлении бота в новую группу
+      if (msg.new_chat_members) {
+        const botJoined = msg.new_chat_members.some(u => u.is_bot && (u.username === "shinymoderation_bot" || u.id === 8227600059));
+        if (botJoined) {
+          KNOWN_CHATS.set(chatId, msg.chat.title || `Чат ${chatId}`);
+          await saveCacheState(ctx);
+
+          const welcomeText =
+            `🛡️ <b>Всем привет! Я ShinyModeration — ваш бот-модератор.</b>\n\n` +
+            `Я защищаю группу от спама, рекламы, ссылок и нарушителей 24/7.\n\n` +
+            `⚡ <b>Для работы защиты:</b>\n` +
+            `Назначьте меня <b>Администратором</b> с правами:\n` +
+            `• <i>Удаление сообщений</i>\n` +
+            `• <i>Блокировка участников</i>\n\n` +
+            `⚙️ <b>Настройки:</b> <code>/settings</code> | 📜 <b>Правила:</b> <code>/rules</code> | 🚪 <b>Выход:</b> <code>выйди</code>`;
+
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: welcomeText,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "⚙️ Настройки чата", callback_data: "cfg_main" },
+                  { text: "📖 Список команд", callback_data: "act_commands_help" }
+                ],
+                [
+                  { text: "👤 Личный кабинет (в ЛС)", url: "https://t.me/shinymoderation_bot?start=panel" }
+                ]
+              ]
+            }
+          });
+          return new Response("OK");
+        }
+
+        // Если включена чистка сервисных сообщений
+        if (chatSettings.clean_service) {
+          await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+          return new Response("OK");
+        }
+      }
+
+      // Чистка сервисных сообщений (выход, закреп)
+      if (msg.left_chat_member || msg.pinned_message) {
         if (chatSettings.clean_service) {
           await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
         }
@@ -638,36 +880,159 @@ export default {
 
       const userId = msg.from.id;
       const username = msg.from.username ? msg.from.username.toLowerCase() : "";
-      const isOwner = username === "deathh1337" || username === "fuckingmyhearts";
+      const firstName = (msg.from.first_name || "").toLowerCase();
+
+      // Определение владельца
+      const isOwner =
+        username === "deathh1337" ||
+        username === "fuckingmyhearts" ||
+        firstName.includes("death.dll") ||
+        OWNER_IDS.has(userId);
+
+      if (isOwner) {
+        OWNER_IDS.add(userId);
+      }
 
       // ==========================================
       // ЛИЧНЫЕ СООБЩЕНИЯ С БОТОМ (Личный кабинет)
       // ==========================================
       if (msg.chat.type === "private") {
         const text = (msg.text || "").trim();
+        const lower = text.toLowerCase();
 
-        // 1. Пересылка сообщения из любой группы: сразу дает кнопки управления этой группой!
+        // 1. Пересылка сообщения из любой группы: мгновенная привязка и кнопки управления
         if (msg.forward_from_chat) {
           const targetChatId = msg.forward_from_chat.id;
           const targetTitle = msg.forward_from_chat.title || "этой группе";
           KNOWN_CHATS.set(targetChatId, targetTitle);
+          await saveCacheState(ctx);
 
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: `📍 <b>Обнаружен чат: «${targetTitle}»</b>\nID: <code>${targetChatId}</code>\n\nВыберите действие:`,
+            text:
+              `📍 <b>Обнаружена группа: «${targetTitle}»</b>\n` +
+              `ID: <code>${targetChatId}</code>\n\n` +
+              `<i>Что вы хотите сделать?</i>`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [
-                [{ text: `🚪 Выйти из «${targetTitle}»`, callback_data: `leave_chat_${targetChatId}` }],
-                [{ text: `🔊 Снять с меня мут в «${targetTitle}»`, callback_data: `unmute_chat_${targetChatId}` }],
-                [{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]
+                [
+                  { text: `⚙️ Настройки «${targetTitle}»`, callback_data: `pm_cfg_chat_${targetChatId}` }
+                ],
+                [
+                  { text: `🔊 Снять с меня мут`, callback_data: `unmute_chat_${targetChatId}` },
+                  { text: `🚪 Выйти из группы`, callback_data: `leave_chat_${targetChatId}` }
+                ],
+                [
+                  { text: "⬅️ В главный кабинет", callback_data: "act_back_dashboard" }
+                ]
               ]
             }
           });
           return new Response("OK");
         }
 
-        // 2. Команды вызова кабинета
+        // 2. Обработка текстовых команд на выход из группы в ЛС
+        if (lower.includes("выйди") || lower.includes("выйти") || lower.includes("leave") || lower.includes("ливай")) {
+          // Ищем группу, если пользователь упомянул название (например, 9А)
+          let matchedChatId = null;
+          let matchedTitle = null;
+
+          for (const [cId, title] of KNOWN_CHATS.entries()) {
+            if (lower.includes(title.toLowerCase()) || (/9\s*[аa]/i.test(title) && /9\s*[аa]/i.test(lower))) {
+              matchedChatId = cId;
+              matchedTitle = title;
+              break;
+            }
+          }
+
+          if (matchedChatId) {
+            try {
+              await tgApi(token, "leaveChat", { chat_id: matchedChatId });
+              KNOWN_CHATS.delete(matchedChatId);
+              await saveCacheState(ctx);
+              await tgApi(token, "sendMessage", {
+                chat_id: chatId,
+                text: `🚪 <b>Бот успешно покинул группу «${matchedTitle}»!</b>`,
+                parse_mode: "HTML",
+                reply_markup: {
+                  inline_keyboard: [[{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]]
+                }
+              });
+            } catch (e) {
+              await tgApi(token, "sendMessage", {
+                chat_id: chatId,
+                text: `❌ Ошибка при выходе: ${e.message}`,
+                parse_mode: "HTML"
+              });
+            }
+            return new Response("OK");
+          }
+
+          // Если группа не указана явно или не найдена в памяти:
+          if (KNOWN_CHATS.size > 0) {
+            const buttons = [];
+            for (const [cId, title] of KNOWN_CHATS.entries()) {
+              buttons.push([{ text: `🚪 Выйти из «${title}»`, callback_data: `leave_chat_${cId}` }]);
+            }
+            buttons.push([{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]);
+
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "🚪 <b>Выберите группу, из которой боту нужно выйти:</b>",
+              parse_mode: "HTML",
+              reply_markup: { inline_keyboard: buttons }
+            });
+            return new Response("OK");
+          } else {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "🚪 <b>Как сделать так, чтобы бот вышел:</b>\n\n" +
+                "1️⃣ <b>Самый быстрый способ:</b> Напишите в самом чате (например, в «9А») слово: <code>выйди</code> — бот сразу покинет чат!\n\n" +
+                "2️⃣ <b>Либо перешлите сюда</b> любое сообщение из вашей группы, чтобы бот увидел её ID.",
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [[{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]]
+              }
+            });
+            return new Response("OK");
+          }
+        }
+
+        // 3. Обработка текстового размута в ЛС
+        if (lower.includes("размут") || lower.includes("сними мут") || lower.includes("unmute")) {
+          let count = 0;
+          for (const [cId, title] of KNOWN_CHATS.entries()) {
+            try {
+              await tgApi(token, "restrictChatMember", {
+                chat_id: cId,
+                user_id: userId,
+                permissions: {
+                  can_send_messages: true,
+                  can_send_audios: true,
+                  can_send_documents: true,
+                  can_send_photos: true,
+                  can_send_videos: true,
+                  can_send_other_messages: true,
+                  can_add_web_page_previews: true
+                }
+              });
+              count++;
+            } catch (e) {}
+          }
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🔊 <b>Мут снят!</b> Все ограничения на отправку сообщений сняты. Можете писать в чат!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "⬅️ В кабинет", callback_data: "act_back_dashboard" }]]
+            }
+          });
+          return new Response("OK");
+        }
+
+        // 4. Показ личного кабинета
         const dash = renderDashboard(userId, msg.from.username);
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
@@ -686,14 +1051,68 @@ export default {
       const parts = rawText.split(/\s+/);
       const firstWord = parts[0].toLowerCase().replace(/@.+$/, '');
 
-      // Команды выхода бота из группы (понимает: /leave, /leavechat, выйди, бот выйди, ливни)
-      if (firstWord === "/leave" || firstWord === "/leavechat" || lowerText === "выйди" || lowerText === "бот выйди" || lowerText === "ливни") {
+      // Команды выхода бота из группы (понимает: выйди, выйти, бот выйди, ливни, пока, /leave, /leavechat)
+      if (
+        lowerText === "выйди" ||
+        lowerText === "выйти" ||
+        lowerText === "бот выйди" ||
+        lowerText === "ливни" ||
+        lowerText === "пока" ||
+        lowerText.startsWith("выйди из") ||
+        firstWord === "/leave" ||
+        firstWord === "/leavechat"
+      ) {
+        const canLeave = isOwner || await isAdmin(token, chatId, userId);
+        if (canLeave) {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "👋 <b>До свидания! Бот выходит из чата по просьбе администратора.</b>",
+            parse_mode: "HTML"
+          });
+          KNOWN_CHATS.delete(chatId);
+          await saveCacheState(ctx);
+          await tgApi(token, "leaveChat", { chat_id: chatId });
+        } else {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "⚠️ Только администраторы чата могут попросить бота выйти.",
+            parse_mode: "HTML"
+          });
+        }
+        return new Response("OK");
+      }
+
+      // Проверка на /start, /help, помощь в группе
+      if (firstWord === "/start" || firstWord === "/help" || firstWord === "помощь" || firstWord === "старт") {
+        const helpText =
+          `🛡️ <b>ShinyModeration — Модератор чата</b>\n\n` +
+          `📍 <b>Чат:</b> ${msg.chat.title || "Этот чат"}\n\n` +
+          `<b>Быстрые команды (ответом на сообщение нарушителя):</b>\n` +
+          `• <code>мут 30м</code> (или <code>/mute 1h</code>, <code>2d</code>) — замутить\n` +
+          `• <code>размут</code> (или <code>/unmute</code>) — снять мут\n` +
+          `• <code>кик</code> (или <code>/kick</code>) — выгнать из группы\n` +
+          `• <code>бан</code> (или <code>/ban</code>) — забанить навсегда\n` +
+          `• <code>дел</code> (или <code>/del</code>) — быстро удалить спам\n` +
+          `• <code>выйди</code> (или <code>/leave</code>) — бот покинет чат\n` +
+          `• <code>/settings</code> — открыть настройки чата\n\n` +
+          `<i>💡 Управлять фильтрами и снимать мут можно также в ЛС у бота!</i>`;
+
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
-          text: "👋 До свидания! Бот выходит из чата.",
-          parse_mode: "HTML"
+          text: helpText,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "⚙️ Настройки чата", callback_data: "cfg_main" },
+                { text: "📜 Правила", callback_data: "act_show_rules" }
+              ],
+              [
+                { text: "👤 Личный кабинет (в ЛС)", url: "https://t.me/shinymoderation_bot?start=panel" }
+              ]
+            ]
+          }
         });
-        await tgApi(token, "leaveChat", { chat_id: chatId });
         return new Response("OK");
       }
 
@@ -706,18 +1125,19 @@ export default {
         if (firstWord === "/rules" || firstWord === "правила") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА:</b>\n\n" +
-                  "1. 🚨 <b>Спам, реклама, криптовалюты и схемы заработка</b> — бан.\n" +
-                  `2. 🔗 <b>Ссылки</b> — ${chatSettings.enable_links ? `мут на ${formatDuration(chatSettings.mute_links_sec)}` : 'разрешены'}.\n` +
-                  `3. 🤬 <b>Мат</b> — ${chatSettings.enable_profanity ? 'запрещен' : 'разрешен'}.\n` +
-                  `4. 📢 <b>Капслок</b> — ${chatSettings.enable_caps ? 'запрещен' : 'разрешен'}.\n\n` +
-                  "<i>Бот модерирует группу автоматически.</i>",
+            text:
+              "📜 <b>ПРАВИЛА НАШЕГО ЧАТА:</b>\n\n" +
+              "1. 🚨 <b>Спам, реклама, криптовалюты и схемы заработка</b> — бан.\n" +
+              `2. 🔗 <b>Ссылки</b> — ${chatSettings.enable_links ? `мут на ${formatDuration(chatSettings.mute_links_sec)}` : 'разрешены'}.\n` +
+              `3. 🤬 <b>Мат</b> — ${chatSettings.enable_profanity ? 'запрещен' : 'разрешен'}.\n` +
+              `4. 📢 <b>Капслок</b> — ${chatSettings.enable_caps ? 'запрещен' : 'разрешен'}.\n\n` +
+              "<i>Бот модерирует группу автоматически.</i>",
             parse_mode: "HTML"
           });
           return new Response("OK");
         }
 
-        // Проверяем права отправителя (владелец @deathh1337 всегда имеет права)
+        // Проверяем права отправителя (владелец всегда имеет права)
         const userIsAdmin = isOwner || await isAdmin(token, chatId, userId);
 
         // Команда /settings или "настройки"
@@ -731,7 +1151,7 @@ export default {
             return new Response("OK");
           }
 
-          const payload = renderMainMenu(chatId, msg.chat.title, chatSettings);
+          const payload = renderChatSettingsPanel(chatId, msg.chat.title, chatSettings, false);
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
             text: payload.text,
@@ -782,7 +1202,7 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /mute или "мут" (пример: мут 30м, мут 2ч, мут 1д)
+        // Команда /mute или "мут"
         if (firstWord === "/mute" || firstWord === "мут") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", { chat_id: chatId, text: "⚠️ Ответьте на сообщение нарушителя: <code>мут 30м</code> (или <code>2h</code>, <code>1d</code>)", parse_mode: "HTML" });
@@ -845,7 +1265,7 @@ export default {
       // ==========================================
       // АВТО-МОДЕРАЦИЯ СООБЩЕНИЙ УЧАСТНИКОВ
       // ==========================================
-      // Владелец @deathh1337 и администраторы имеют полный иммунитет
+      // Владельцы (@deathh1337, @fuckingmyhearts) имеют постоянный иммунитет
       if (isOwner) {
         return new Response("OK");
       }
@@ -866,8 +1286,9 @@ export default {
 
           const alertRes = await (await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: `🚨 <b>Нарушитель заблокирован!</b>\n` +
-                  `👤 ${mention} нарушил: <b>${scamReason}</b>`,
+            text:
+              `🚨 <b>Нарушитель заблокирован!</b>\n` +
+              `👤 ${mention} нарушил: <b>${scamReason}</b>`,
             parse_mode: "HTML"
           })).json();
 
@@ -896,8 +1317,9 @@ export default {
 
         const alertRes = await (await tgApi(token, "sendMessage", {
           chat_id: chatId,
-          text: `🔇 ${mention} <b>отправлен в мут на ${formatDuration(chatSettings.mute_links_sec)}!</b>\n` +
-                `⛔ Причина: <b>Ссылки запрещены</b>`,
+          text:
+            `🔇 ${mention} <b>отправлен в мут на ${formatDuration(chatSettings.mute_links_sec)}!</b>\n` +
+            `⛔ Причина: <b>Ссылки запрещены</b>`,
           parse_mode: "HTML"
         })).json();
 
