@@ -5,6 +5,51 @@ from aiogram.enums import MessageEntityType
 from config import settings
 
 
+HARDCORE_SCAM_PATTERNS = [
+    r'пассивн(?:ый|ого|ому|ом|ым)\s+доход',
+    r'заработ(?:ок|ать|ай|ывай|аем)',
+    r'(?:доход|заработок)\s+от\s+\d+',
+    r'\d+\s*(?:тыс|к|руб|\$|usdt|евро)\s+(?:в\s+день|в\s+сутки|ежедневно)',
+    r'легкие\s+деньги',
+    r'быстр(?:ый|ые)\s+деньги',
+    r'подработк[аеиу]\s+(?:для\s+всех|на\s+дому|онлайн)',
+    r'удаленн(?:ая|ой)\s+работ[аеы]',
+    r'работа\s+без\s+опыта',
+    r'ваканси[яи]\s+онлайн',
+    r'набираю\s+(?:в\s+команду|людей|сотрудников)',
+    r'требуются\s+(?:люди|девушки|парни|сотрудники)',
+    r'без\s+вложений',
+    r'пиши(?:те)?\s+(?:мне\s+)?в\s+(?:лс|личку|директ|тг)',
+    r'жду\s+в\s+(?:лс|личке)',
+    r'отве(?:тил|тила)\s+в\s+лс',
+    r'скинул[а]?\s+в\s+лс',
+    r'подробност[ией]+\s+в\s+(?:лс|профиле|описании|закрепе)',
+    r'ссылк[аеу]\s+в\s+(?:профиле|шапке|био|закрепе)',
+    r'сигнал[ыов]+\s+по\s+крипт',
+    r'инвестици[иях]\s+от',
+    r'дарю\s+(?:крипт|usdt|тон|ton|btc|биткоин)',
+    r'раздач[аеи]\s+(?:крипт|usdt|ton|монет|денег)',
+    r'арбитраж\s+(?:крипт|валют|p2p)',
+    r'связк[аи]\s+(?:p2p|п2п|крипт)',
+    r'раскрутк[аеи]\s+(?:счета|депозита)',
+    r'удвою\s+(?:баланс|депозит)',
+    r'эйрдроп|airdrop|whitelist|вайтлист',
+    r'слив\s+(?:приват|шкур|фото|видео|переписок)',
+    r'интим\s*(?:фото|видео|знакомств)',
+    r'накрутк[аеи]\s+(?:подписчиков|лайков|ботов)',
+    r'взлом\s+(?:вк|тг|телеграм|аккаунт)'
+]
+
+SCAM_REGEXES = [re.compile(p, re.IGNORECASE) for p in HARDCORE_SCAM_PATTERNS]
+
+
+def is_scam_or_promo_phrase(text: str) -> bool:
+    """Checks for known spam/scam/crypto promotion phrases."""
+    if not text:
+        return False
+    return any(r.search(text) for r in SCAM_REGEXES)
+
+
 def is_caps_abuse(text: str) -> bool:
     """Detects if message is written in excessive Caps Lock."""
     if not text or len(text) < settings.MIN_CAPS_LEN:
@@ -73,6 +118,9 @@ def check_spam(message: Message) -> Tuple[bool, Optional[str]]:
         return False, None
 
     text = message.text or message.caption or ""
+
+    if is_scam_or_promo_phrase(text):
+        return True, "Рекламный спам / мошенничество"
 
     if is_channel_forward(message):
         return True, "Пересылка рекламы из канала"

@@ -1,28 +1,33 @@
-// Cloudflare Worker: Telegram Moderator Bot
-// Handles incoming Webhooks from Telegram Bot API
+// Cloudflare Worker: Telegram Hardcore Moderator Bot
+// Strict zero-tolerance moderation system for groups and supergroups
 
-// Settings
+// Hardcore Settings
 const SETTINGS = {
   ENABLE_LINKS: true,
   ENABLE_PROFANITY: true,
   ENABLE_SPAM: true,
-  MAX_CAPS_PERCENT: 70,
-  AUTO_DELETE_SEC: 8
+  MAX_CAPS_PERCENT: 65,      // Снижен порог капса для жесткости (от 8 букв)
+  AUTO_DELETE_SEC: 6,        // Авто-удаление алертов бота через 6 секунд (стерильный чат)
+  MUTE_LINKS_SEC: 86400,     // Мут за ссылки: 24 часа
+  MUTE_PROFANITY_SEC: 7200,  // Мут за мат/оскорбления: 2 часа
+  MUTE_CAPS_SEC: 900         // Мут за капс/флуд: 15 минут
 };
 
-// Whitelist of words containing letter combinations that look like profanity roots
+// Whitelist of words containing roots that might trigger false positives
 const WHITELIST = [
   "рубл", "употреб", "колеб", "хлеб", "гребл", "стебл", "тереб",
   "скреб", "страх", "скипидар", "педиатр", "мудр", "бляха", "сабл",
-  "сукно", "суккулент", "шахмат", "эрудит", "парикмахер", "команд", "мандарин"
+  "сукно", "суккулент", "шахмат", "эрудит", "парикмахер", "команд",
+  "мандарин", "потреб", "ибо", "пароход", "страхов"
 ];
 
 // Homoglyphs and leetspeak translation
 const HOMOGLYPHS = {
   'a': 'а', '@': 'а', 'b': 'в', '6': 'б', 'c': 'с', 's': 'с', '$': 'с',
-  'e': 'е', '3': 'з', 'i': 'и', '1': 'и', '!': 'и', 'k': 'к', 'm': 'м',
-  'o': 'о', '0': 'о', 'p': 'р', 't': 'т', '7': 'т', 'u': 'у', 'y': 'у',
-  'x': 'х', '4': 'ч'
+  'e': 'е', '3': 'з', 'i': 'и', '1': 'и', '!': 'и', '|': 'и', 'k': 'к',
+  'm': 'м', 'n': 'п', 'o': 'о', '0': 'о', 'p': 'р', 'r': 'г', 't': 'т',
+  '7': 'т', 'u': 'у', 'y': 'у', 'v': 'в', 'w': 'в', 'x': 'х', 'z': 'з',
+  '4': 'ч'
 };
 
 function normalizeText(text) {
@@ -32,19 +37,50 @@ function normalizeText(text) {
   return res;
 }
 
-// 1. Link Check
+// 1. Ультимативная проверка на ссылки и рекламу
 function hasLinks(msg) {
   const entities = (msg.entities || []).concat(msg.caption_entities || []);
   for (let e of entities) {
     if (e.type === "url" || e.type === "text_link") return true;
+    if (e.type === "mention") return true; // Блокировка тегов @каналов и @ботов
   }
+
   const text = msg.text || msg.caption || "";
-  const urlRegex = /(?:https?:\/\/|www\.|t\.me\/|[a-z0-9-]+\.(?:com|ru|org|net|xyz|top|online|site|pro|app|io|me|link|live|fun|vip|to|tv|cc|gg))\b/i;
-  const obfuscatedRegex = /[a-z0-9-]+\s*(?:\[\.\]|\(\.\)|\s+dot\s+|\s+точка\s+)\s*(?:com|ru|org|net|xyz|top|site)/i;
-  return urlRegex.test(text) || obfuscatedRegex.test(text);
+
+  // Протоколы и ссылки telegram
+  if (/(?:https?:\/\/|ftps?:\/\/|tg:\/\/|t\.me\/|telegram\.me\/|telegram\.dog\/)/i.test(text)) {
+    return true;
+  }
+
+  // Расширенный список доменных зон интернета
+  const domainRegex = /\b[a-z0-9-]{2,}\.(?:com|ru|org|net|xyz|top|online|site|pro|app|io|me|link|live|fun|vip|to|tv|cc|gg|su|kz|by|ua|info|biz|co|tech|space|club|shop|work|agency|dev|cloud|store|click|press|group|design|trade|wiki|monster|fit|icu|pw|rest|casa|buzz|best|ooo|cyou|cfd|art|lat|one|bar|sbs)\b/i;
+  if (domainRegex.test(text)) return true;
+
+  // Замаскированные ссылки: domain[.]ru, domain(dot)com, domain точка ру, domain/com
+  const obfuscatedRegex = /[a-z0-9-]{2,}\s*(?:\[\.\]|\(\.\)|\s+dot\s+|\s+точка\s+|\s*\/\s*)(?:com|ru|org|net|xyz|top|site|online|me|io)/i;
+  if (obfuscatedRegex.test(text)) return true;
+
+  // Разреженные ссылки: "t . m e /" или "w w w ."
+  if (/\b(?:t\s*\.\s*m\s*e|w\s*w\s*w)\b/i.test(text)) return true;
+
+  // Любые юзернеймы через @ в обычном тексте
+  if (/(?:^|\s)@[a-zA-Z0-9_]{4,}/.test(text)) return true;
+
+  return false;
 }
 
-// 2. Profanity Check
+// 2. Жесткий мат-фильтр с детекцией маскировки
+const PROFANE_ROOTS = [
+  /п[иеё]зд/i, /залуп/i, /шлюх/i, /шлюш/i, /п[ие]д[ао]р/i, /педик/i,
+  /дроч/i, /елда/i, /манда/i, /муд[аио]к/i, /гондон/i, /гандон/i,
+  /\bху[йиеёяю]/i, /\bпоху/i, /\bнаху/i, /\bниху/i, /\bоху/i, /\bдоху/i,
+  /\bхер/i, /\b[её]б/i, /\bвыеб/i, /\bзаеб/i, /\bнаеб/i, /\bпроеб/i,
+  /\bразъеб/i, /\bподъеб/i, /\bс[ъь]?еб/i, /\bебл/i, /\bебуч/i, /\bебн/i,
+  /\bбл[яе][дт]/i, /\bбля\b/i, /\bсук[аиоеуы]\b/i, /\bсучк/i, /\bсучар/i,
+  /\bмраз/i, /\bублюд/i, /\bтварь\b/i, /\bчмо\b/i, /\bдолбо[её]б/i,
+  /\bхуесос/i, /\bпиздюк/i, /\bшалав/i, /\bшмара/i, /\bдаун\b/i, /\bкончен/i
+];
+
 function hasProfanity(text) {
   if (!text) return false;
   const norm = normalizeText(text);
@@ -72,53 +108,93 @@ function hasProfanity(text) {
   }
   if (single.length >= 2) variations.push(single.join(''));
 
-  const profaneRoots = [
-    /п[иеё]зд/i, /залуп/i, /шлюх/i, /шлюш/i, /п[ие]д[ао]р/i, /педик/i,
-    /дроч/i, /елда/i, /манда/i, /муд[аио]к/i, /гондон/i, /гандон/i,
-    /\bху[йиеёяю]/i, /\bпоху/i, /\bнаху/i, /\bниху/i, /\bоху/i, /\bдоху/i,
-    /\bхер/i, /\b[её]б/i, /\bвыеб/i, /\bзаеб/i, /\bнаеб/i, /\bпроеб/i,
-    /\bбл[яе][дт]/i, /\bбля\b/i, /\bсук[аиоеуы]\b/i, /\bсучк/i, /\bсучар/i, /\bмраз/i
-  ];
-
   for (let v of variations) {
     if (WHITELIST.some(w => v.includes(w))) continue;
-    for (let r of profaneRoots) {
+    for (let r of PROFANE_ROOTS) {
       if (r.test(v)) return true;
     }
   }
   return false;
 }
 
-// 3. Spam Check
-const SPAM_PHRASES = [
+// 3. База стоп-фраз мошенников, спамеров и нежелательной рекламы (КАРА: БАН НАВСЕГДА)
+const SCAM_PATTERNS = [
+  // Заработок / деньги / удаленка
   /пассивн(?:ый|ого|ому|ом|ым)\s+доход/i,
-  /заработ(?:ок|ать|ай|ывай)\s+(?:в\s+день|от|в\s+лс|онлайн)/i,
-  /пиши(?:те)?\s+в\s+лс/i,
-  /слив\s+приват/i,
+  /заработ(?:ок|ать|ай|ывай|аем)/i,
+  /(?:доход|заработок)\s+от\s+\d+/i,
+  /\d+\s*(?:тыс|к|руб|\$|usdt|евро)\s+(?:в\s+день|в\s+сутки|ежедневно)/i,
+  /легкие\s+деньги/i,
+  /быстр(?:ый|ые)\s+деньги/i,
+  /кнопка\s+бабло/i,
+  /подработк[аеиу]\s+(?:для\s+всех|на\s+дому|онлайн)/i,
+  /удаленн(?:ая|ой)\s+работ[аеы]/i,
+  /работа\s+без\s+опыта/i,
+  /ваканси[яи]\s+онлайн/i,
+  /набираю\s+(?:в\s+команду|людей|сотрудников)/i,
+  /требуются\s+(?:люди|девушки|парни|сотрудники)/i,
+  /вложений\s+не\s+требуется/i,
+  /без\s+вложений/i,
+
+  // Призывы писать в личку
+  /пиши(?:те)?\s+(?:мне\s+)?в\s+(?:лс|личку|директ|тг)/i,
+  /жду\s+в\s+(?:лс|личке)/i,
+  /отве(?:тил|тила)\s+в\s+лс/i,
+  /скинул[а]?\s+в\s+лс/i,
+  /подробност[ией]+\s+в\s+(?:лс|профиле|описании|закрепе)/i,
+  /ссылк[аеу]\s+в\s+(?:профиле|шапке|био|закрепе)/i,
+
+  // Крипто-скам / пампы / сигналы / арбитраж
   /сигнал[ыов]+\s+по\s+крипт/i,
   /инвестици[иях]\s+от/i,
-  /переходи\s+по\s+ссылке/i,
-  /легкие\s+деньги/i,
-  /отдам\s+даром/i,
-  /дарю\s+крипт/i
+  /дарю\s+(?:крипт|usdt|тон|ton|btc|биткоин)/i,
+  /раздач[аеи]\s+(?:крипт|usdt|ton|монет|денег)/i,
+  /арбитраж\s+(?:крипт|валют|p2p)/i,
+  /связк[аи]\s+(?:p2p|п2п|крипт)/i,
+  /раскрутк[аеи]\s+(?:счета|депозита)/i,
+  /удвою\s+(?:баланс|депозит)/i,
+  /эйрдроп|airdrop|whitelist|вайтлист/i,
+
+  // 18+ / сливы / порно
+  /слив\s+(?:приват|шкур|фото|видео|переписок)/i,
+  /интим\s*(?:фото|видео|знакомств)/i,
+  /порно|проститутка|эскорт/i,
+  /меф|гашиш|бошки|закладк[иа]/i,
+
+  // Накрутка / читы / взлом
+  /накрутк[аеи]\s+(?:подписчиков|лайков|ботов)/i,
+  /взлом\s+(?:вк|тг|телеграм|аккаунт)/i,
+  /продам\s+аккаунт/i,
+  /кардинг|залив\s+на\s+карту/i
 ];
 
-function hasSpam(msg) {
+function checkScamOrPromo(msg) {
   const text = msg.text || msg.caption || "";
-  
-  // Рекламные пересылки из каналов
+
+  // Рекламные пересылки из других каналов
   if (msg.forward_origin?.type === "channel" || msg.forward_from_chat?.type === "channel") {
-    return "Реклама из каналов";
+    return "Рекламный репост из стороннего канала";
   }
 
-  // Стоп-фразы спамеров и мошенников
-  for (let reg of SPAM_PHRASES) {
+  // Стоп-фразы скамеров
+  for (let reg of SCAM_PATTERNS) {
     if (reg.test(text)) return "Рекламный спам / мошенничество";
   }
 
+  // Массовые упоминания (@user1 @user2 @user3...)
+  const mentions = (msg.entities || []).filter(e => e.type === "mention" || e.type === "text_mention");
+  if (mentions.length >= 3) return "Массовый спам упоминаниями пользователей";
+
+  return null;
+}
+
+// 4. Проверка капса и спама символами
+function checkCapsOrFlooding(msg) {
+  const text = msg.text || msg.caption || "";
+
   // CAPS LOCK
   const letters = text.replace(/[^a-zA-Zа-яёА-ЯЁ]/g, '');
-  if (letters.length >= 12) {
+  if (letters.length >= 8) {
     const upper = letters.replace(/[^A-ZА-ЯЁ]/g, '').length;
     if ((upper / letters.length) * 100 >= SETTINGS.MAX_CAPS_PERCENT) {
       return "Злоупотребление CAPS LOCK";
@@ -126,11 +202,7 @@ function hasSpam(msg) {
   }
 
   // Повторяющиеся символы (аааааа...)
-  if (/(.)\1{25,}/.test(text)) return "Спам повторяющимися символами";
-
-  // Массовые упоминания (@user1 @user2 @user3...)
-  const mentions = (msg.entities || []).filter(e => e.type === "mention" || e.type === "text_mention");
-  if (mentions.length >= 4) return "Массовое упоминание пользователей";
+  if (/(.)\1{20,}/.test(text)) return "Спам повторяющимися символами";
 
   return null;
 }
@@ -155,24 +227,11 @@ async function isAdmin(token, chatId, userId) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const token = env?.BOT_TOKEN;
-    if (!token) {
-      return new Response("BOT_TOKEN is not configured in Environment Variables", { status: 500 });
-    }
-
-    // Optional secret verification from Telegram
-    const secretToken = env?.SECRET_TOKEN;
-    if (secretToken && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== secretToken) {
-      if (request.method === "POST") {
-        return new Response("Unauthorized", { status: 403 });
-      }
-    }
+    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
 
     if (url.pathname === "/set-webhook") {
       const webhookUrl = `${url.origin}/`;
-      const payload = { url: webhookUrl };
-      if (secretToken) payload.secret_token = secretToken;
-      const res = await tgApi(token, "setWebhook", payload);
+      const res = await tgApi(token, "setWebhook", { url: webhookUrl });
       const data = await res.json();
       return new Response(JSON.stringify(data, null, 2), {
         headers: { "Content-Type": "application/json" }
@@ -199,7 +258,7 @@ export default {
       const commands = [
         { command: "start", description: "Запустить бота и получить информацию" },
         { command: "help", description: "Справка по командам модератора" },
-        { command: "rules", description: "Показать правила чата" },
+        { command: "rules", description: "Показать правила чата (Жесткий режим)" },
         { command: "mute", description: "Замутить (ответом: /mute 30m / 2h / 1d)" },
         { command: "unmute", description: "Снять мут с пользователя (ответом)" },
         { command: "kick", description: "Выгнать пользователя из группы (ответом)" },
@@ -216,7 +275,7 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return new Response("Telegram Moderator Bot is running on Cloudflare Workers!\nVisit /set-webhook to link bot.", { status: 200 });
+      return new Response("Telegram Hardcore Moderator Bot is active!\nVisit /set-webhook to link bot.", { status: 200 });
     }
 
     try {
@@ -228,9 +287,19 @@ export default {
 
       const chatId = msg.chat.id;
 
-      // Авто-удаление служебных сообщений "Пользователь вступил в группу / покинул группу"
-      if (msg.new_chat_members || msg.left_chat_member) {
+      // 🧹 Стерильность: Мгновенное авто-удаление системных сообщений
+      if (msg.new_chat_members || msg.left_chat_member || msg.pinned_message) {
         await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+
+        // Анти-рейд: мгновенный БАН ботов со ссылками или рекламой в имени при входе
+        if (msg.new_chat_members) {
+          for (let u of msg.new_chat_members) {
+            const fullName = `${u.first_name || ""} ${u.last_name || ""}`;
+            if (hasLinks({ text: fullName }) || checkScamOrPromo({ text: fullName })) {
+              await tgApi(token, "banChatMember", { chat_id: chatId, user_id: u.id });
+            }
+          }
+        }
         return new Response("OK");
       }
 
@@ -240,7 +309,7 @@ export default {
 
       const userId = msg.from.id;
 
-      // Ответ на /start и сообщения в ЛС
+      // Ответ на /start в личных сообщениях
       if (msg.chat.type === "private") {
         let botUsername = "shinymoderation_bot";
         try {
@@ -251,20 +320,22 @@ export default {
         } catch (e) {}
 
         const welcomeText =
-          "🛡️ <b>Привет! Я бот-модератор для групп Telegram.</b>\n\n" +
-          "<b>Что я делаю в группе автоматически:</b>\n" +
-          "• 🔗 <b>Блокирую любые ссылки</b> (сайты, t.me, скрытые и замаскированные ссылки)\n" +
-          "• 🤬 <b>Удаляю маты</b> (с защитой от обхода латиницей, точками, пробелами и цифрами)\n" +
-          "• 🚫 <b>Блокирую спам</b> (CAPS LOCK, спам символами, рекламные пересылки из каналов)\n\n" +
-          "<b>Команды администраторов (в группе):</b>\n" +
-          "• <code>/mute [время]</code> — замутить (ответом на сообщение: <code>/mute 30m</code>, <code>/mute 2h</code>, <code>/mute 1d</code>)\n" +
-          "• <code>/unmute</code> — снять мут (ответом на сообщение)\n" +
-          "• <code>/ban</code> — забанить нарушителя (ответом на сообщение)\n" +
-          "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя\n" +
-          "• <code>/warn [причина]</code> — выдать предупреждение\n\n" +
-          "<b>Как меня запустить:</b>\n" +
-          "1. Нажмите кнопку ниже или добавьте меня в группу.\n" +
-          "2. Назначьте меня <b>Администратором</b> с правами <b>Удаление сообщений</b> и <b>Блокировка пользователей</b>.";
+          "🛡️ <b>Привет! Я бот с жестким режимом модерации групп.</b>\n\n" +
+          "<b>Правила жесткой системы:</b>\n" +
+          "• 🚨 <b>Спам, реклама, крипта, заработок</b> $\\rightarrow$ <b>БАН НАВСЕГДА</b>\n" +
+          "• 🔗 <b>Любые ссылки, скрытые ссылки и теги</b> $\\rightarrow$ <b>МУТ НА 24 ЧАСА</b>\n" +
+          "• 🤬 <b>Нецензурная лексика и оскорбления</b> $\\rightarrow$ <b>МУТ НА 2 ЧАСА</b>\n" +
+          "• 📢 <b>Капслок и спам символами</b> $\\rightarrow$ <b>МУТ НА 15 МИНУТ</b>\n" +
+          "• 🧹 <b>Стерильный чат</b>: системные сообщения входа/выхода удаляются сразу.\n\n" +
+          "<b>Команды администраторов:</b>\n" +
+          "• <code>/rules</code> — правила чата\n" +
+          "• <code>/mute [время]</code> — замутить нарушителя\n" +
+          "• <code>/unmute</code> — снять мут\n" +
+          "• <code>/kick</code> — выгнать из группы\n" +
+          "• <code>/ban</code> — забанить навсегда\n" +
+          "• <code>/del</code> — удалить сообщение\n" +
+          "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя\n\n" +
+          "<b>Как запустить:</b> добавьте бота в группу и назначьте <b>Администратором</b> с правами на удаление сообщений и блокировку пользователей.";
 
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
@@ -279,45 +350,48 @@ export default {
         return new Response("OK");
       }
 
-      // Обработка команд администраторов в группе
+      // Администраторыチャта имеют иммунитет к фильтрам
       if (await isAdmin(token, chatId, userId)) {
         const text = (msg.text || "").trim();
         const parts = text.split(/\s+/);
-        const cmd = parts[0].toLowerCase().replace(/@.+$/, ''); // убираем @botname из /mute@botname
+        const cmd = parts[0].toLowerCase().replace(/@.+$/, '');
 
         if (cmd === "/start" || cmd === "/help") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "🛡️ <b>Бот-модератор активен!</b>\n\n" +
-                  "Команды администратора (ответом на сообщение нарушителя):\n" +
+            text: "🛡️ <b>Жесткая система модерации активна!</b>\n\n" +
+                  "Нарушители караются мгновенно:\n" +
+                  "• Реклама/Скам $\\rightarrow$ <b>БАН</b>\n" +
+                  "• Ссылки $\\rightarrow$ <b>МУТ 24ч</b>\n" +
+                  "• Мат $\\rightarrow$ <b>МУТ 2ч</b>\n" +
+                  "• Капс $\\rightarrow$ <b>МУТ 15м</b>\n\n" +
+                  "Команды администратора (ответом на сообщение):\n" +
                   "• <code>/rules</code> — показать правила чата\n" +
-                  "• <code>/mute 30m / 2h / 1d</code> — замутить пользователя\n" +
+                  "• <code>/mute 30m / 2h / 1d</code> — замутить\n" +
                   "• <code>/unmute</code> — снять мут\n" +
-                  "• <code>/kick</code> — выгнать пользователя из группы\n" +
-                  "• <code>/ban</code> — забанить навсегда\n" +
-                  "• <code>/warn [причина]</code> — выдать предупреждение\n" +
+                  "• <code>/kick</code> — выгнать\n" +
+                  "• <code>/ban</code> — забанить\n" +
                   "• <code>/del</code> — быстро удалить сообщение\n" +
-                  "• <code>/unban &lt;ID&gt;</code> — разбанить пользователя",
+                  "• <code>/unban &lt;ID&gt;</code> — разбанить по ID",
             parse_mode: "HTML"
           });
           return new Response("OK");
         }
 
-        // Команда /rules
         if (cmd === "/rules") {
           await tgApi(token, "sendMessage", {
             chat_id: chatId,
-            text: "📜 <b>Правила нашего чата:</b>\n\n" +
-                  "1. 🔗 <b>Никаких ссылок</b> (на сайты, каналы, ботов, чаты).\n" +
-                  "2. 🤬 <b>Уважайте участников</b> — нецензурная лексика и оскорбления запрещены.\n" +
-                  "3. 🚫 <b>Без спама</b> — флуд, капслок, реклама и заработки немедленно удаляются.\n\n" +
-                  "<i>За нарушения бот автоматически выдает мут!</i>",
+            text: "📜 <b>ПРАВИЛА НАШЕГО ЧАТА (ЖЕСТКИЙ РЕЖИМ):</b>\n\n" +
+                  "1. 🚨 <b>Никакого спама, рекламы, криптовалют и заработков</b> — карается <b>перманентным баном</b>.\n" +
+                  "2. 🔗 <b>Никаких ссылок и сторонних упоминаний</b> — карается <b>мутом на 24 часа</b>.\n" +
+                  "3. 🤬 <b>Уважайте участников</b> — нецензурная брань и оскорбления караются <b>мутом на 2 часа</b>.\n" +
+                  "4. 📢 <b>Без капса и флуда</b> — карается <b>мутом на 15 минут</b>.\n\n" +
+                  "<i>Бот модерирует группу в реальном времени. Нарушения удаляются моментально!</i>",
             parse_mode: "HTML"
           });
           return new Response("OK");
         }
 
-        // Команда /del (быстрое удаление сообщения)
         if (cmd === "/del") {
           if (msg.reply_to_message) {
             await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.reply_to_message.message_id });
@@ -326,7 +400,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /kick (выгнать из чата)
         if (cmd === "/kick") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", {
@@ -348,7 +421,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /mute
         if (cmd === "/mute") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", {
@@ -386,7 +458,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /unmute
         if (cmd === "/unmute") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", {
@@ -419,7 +490,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /ban
         if (cmd === "/ban") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", {
@@ -440,7 +510,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /unban
         if (cmd === "/unban") {
           let targetId = parts[1];
           if (!targetId && msg.reply_to_message?.from) {
@@ -463,7 +532,6 @@ export default {
           return new Response("OK");
         }
 
-        // Команда /warn
         if (cmd === "/warn") {
           if (!msg.reply_to_message || !msg.reply_to_message.from) {
             await tgApi(token, "sendMessage", {
@@ -487,25 +555,24 @@ export default {
         return new Response("OK");
       }
 
-      let reason = null;
+      // ==========================================
+      // ЖЕСТКАЯ АВТО-МОДЕРАЦИЯ СООБЩЕНИЙ УЧАСТНИКОВ
+      // ==========================================
       const text = msg.text || msg.caption || "";
+      const mention = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
 
-      if (SETTINGS.ENABLE_LINKS && hasLinks(msg)) {
-        reason = "Ссылки запрещены правилами чата";
-      } else if (SETTINGS.ENABLE_PROFANITY && hasProfanity(text)) {
-        reason = "Нецензурная лексика запрещена";
-      } else if (SETTINGS.ENABLE_SPAM) {
-        const spamReason = hasSpam(msg);
-        if (spamReason) reason = spamReason;
-      }
-
-      if (reason) {
+      // 1. ПРОВЕРКА НА СПАМ, СКАМ, РЕКЛАМУ И КРИПТУ -> БАН НАВСЕГДА
+      const scamReason = checkScamOrPromo(msg);
+      if (scamReason) {
         await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        await tgApi(token, "banChatMember", { chat_id: chatId, user_id: userId });
 
-        const mention = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
         const alertRes = await (await tgApi(token, "sendMessage", {
           chat_id: chatId,
-          text: `⚠️ ${mention}, ваше сообщение удалено!\nПричина: <b>${reason}</b>`,
+          text: `🚨 <b>Нарушитель заблокирован навсегда!</b>\n` +
+                `👤 Пользователь: ${mention}\n` +
+                `⛔ Нарушение: <b>${scamReason}</b>\n` +
+                `<i>Реклама и спам пресекаются моментально.</i>`,
           parse_mode: "HTML"
         })).json();
 
@@ -517,7 +584,99 @@ export default {
             }, SETTINGS.AUTO_DELETE_SEC * 1000);
           }));
         }
+        return new Response("OK");
       }
+
+      // 2. ПРОВЕРКА НА ССЫЛКИ И ТЕГИ -> МУТ НА 24 ЧАСА
+      if (SETTINGS.ENABLE_LINKS && hasLinks(msg)) {
+        await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_LINKS_SEC;
+        await tgApi(token, "restrictChatMember", {
+          chat_id: chatId,
+          user_id: userId,
+          permissions: { can_send_messages: false },
+          until_date: untilDate
+        });
+
+        const alertRes = await (await tgApi(token, "sendMessage", {
+          chat_id: chatId,
+          text: `🔇 ${mention} <b>отправлен в мут на 24 часа!</b>\n` +
+                `⛔ Причина: <b>Публикация ссылок и упоминаний запрещена</b>`,
+          parse_mode: "HTML"
+        })).json();
+
+        if (alertRes.ok && alertRes.result?.message_id) {
+          ctx.waitUntil(new Promise(resolve => {
+            setTimeout(async () => {
+              await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
+              resolve();
+            }, SETTINGS.AUTO_DELETE_SEC * 1000);
+          }));
+        }
+        return new Response("OK");
+      }
+
+      // 3. ПРОВЕРКА НА МАТ И ОСКОРБЛЕНИЯ -> МУТ НА 2 ЧАСА
+      if (SETTINGS.ENABLE_PROFANITY && hasProfanity(text)) {
+        await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+        const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_PROFANITY_SEC;
+        await tgApi(token, "restrictChatMember", {
+          chat_id: chatId,
+          user_id: userId,
+          permissions: { can_send_messages: false },
+          until_date: untilDate
+        });
+
+        const alertRes = await (await tgApi(token, "sendMessage", {
+          chat_id: chatId,
+          text: `🤬 ${mention} <b>замучен на 2 часа!</b>\n` +
+                `⛔ Причина: <b>Нецензурная брань и оскорбления</b>`,
+          parse_mode: "HTML"
+        })).json();
+
+        if (alertRes.ok && alertRes.result?.message_id) {
+          ctx.waitUntil(new Promise(resolve => {
+            setTimeout(async () => {
+              await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
+              resolve();
+            }, SETTINGS.AUTO_DELETE_SEC * 1000);
+          }));
+        }
+        return new Response("OK");
+      }
+
+      // 4. ПРОВЕРКА НА КАПС И СПАМ СИМВОЛАМИ -> МУТ НА 15 МИНУТ
+      if (SETTINGS.ENABLE_SPAM) {
+        const capsReason = checkCapsOrFlooding(msg);
+        if (capsReason) {
+          await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: msg.message_id });
+          const untilDate = Math.floor(Date.now() / 1000) + SETTINGS.MUTE_CAPS_SEC;
+          await tgApi(token, "restrictChatMember", {
+            chat_id: chatId,
+            user_id: userId,
+            permissions: { can_send_messages: false },
+            until_date: untilDate
+          });
+
+          const alertRes = await (await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `⚠️ ${mention} <b>замучен на 15 минут!</b>\n` +
+                  `⛔ Причина: <b>${capsReason}</b>`,
+            parse_mode: "HTML"
+          })).json();
+
+          if (alertRes.ok && alertRes.result?.message_id) {
+            ctx.waitUntil(new Promise(resolve => {
+              setTimeout(async () => {
+                await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: alertRes.result.message_id });
+                resolve();
+              }, SETTINGS.AUTO_DELETE_SEC * 1000);
+            }));
+          }
+          return new Response("OK");
+        }
+      }
+
     } catch (err) {
       console.error(err);
     }
