@@ -638,7 +638,7 @@ export default {
 
       const userId = msg.from.id;
       const username = msg.from.username ? msg.from.username.toLowerCase() : "";
-      const isOwner = username === "deathh1337";
+      const isOwner = username === "deathh1337" || username === "fuckingmyhearts";
 
       // ==========================================
       // ЛИЧНЫЕ СООБЩЕНИЯ С БОТОМ (Личный кабинет)
