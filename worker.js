@@ -1,22 +1,23 @@
 // Cloudflare Worker: Telegram Hardcore Moderator Bot
 // Strict zero-tolerance moderation system with customizable settings per chat
 
-// Default Settings
+// Default Settings (Капс и маты отключены по умолчанию)
 const DEFAULT_SETTINGS = {
   enable_links: true,
-  enable_profanity: true,
-  enable_spam: true,
-  enable_caps: true,
-  clean_service: true,
-  max_caps_percent: 65,
+  enable_profanity: false,   // Маты НЕ мутить
+  enable_spam: true,         // Спам / скам
+  enable_caps: false,        // Капс НЕ мутить
+  clean_service: false,
+  max_caps_percent: 85,
   auto_delete_sec: 6,
   mute_links_sec: 86400,     // 24 часа
-  mute_profanity_sec: 7200,  // 2 часа
-  mute_caps_sec: 900         // 15 минут
+  mute_profanity_sec: 0,
+  mute_caps_sec: 0
 };
 
 // Global in-memory storage for settings per chat
 const CHAT_SETTINGS = new Map();
+const KNOWN_CHATS = new Map();
 
 async function getChatSettings(env, chatId) {
   const key = `settings_${chatId}`;
@@ -546,6 +547,45 @@ export default {
       });
     }
 
+    if (url.pathname === "/lookup-user") {
+      const cleanU = (url.searchParams.get("username") || "deathh1337").replace(/^@/, '');
+      const res = await tgApi(token, "getChat", { chat_id: `@${cleanU}` });
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (url.pathname === "/known-chats") {
+      const list = Array.from(KNOWN_CHATS.entries()).map(([id, title]) => ({ id, title }));
+      return new Response(JSON.stringify(list, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (url.pathname === "/unmute") {
+      const cId = url.searchParams.get("chat_id");
+      const uId = url.searchParams.get("user_id");
+      if (!cId || !uId) return new Response("Missing chat_id or user_id", { status: 400 });
+      const res = await tgApi(token, "restrictChatMember", {
+        chat_id: cId,
+        user_id: uId,
+        permissions: {
+          can_send_messages: true,
+          can_send_audios: true,
+          can_send_documents: true,
+          can_send_photos: true,
+          can_send_videos: true,
+          can_send_other_messages: true,
+          can_add_web_page_previews: true
+        }
+      });
+      const data = await res.json();
+      return new Response(JSON.stringify(data, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/set-commands") {
       const commands = [
         { command: "start", description: "Запустить бота и получить информацию" },
@@ -585,7 +625,17 @@ export default {
 
       const chatId = msg.chat.id;
       const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
+      if (isGroup) {
+        KNOWN_CHATS.set(chatId, msg.chat.title || `Чат ${chatId}`);
+      }
       const chatSettings = await getChatSettings(env, chatId);
+
+      // Специальное правило для чата 9А: маты и капс полностью отключены!
+      const isChat9A = msg.chat.title && /9\s*[аa]/i.test(msg.chat.title);
+      if (isChat9A) {
+        chatSettings.enable_profanity = false;
+        chatSettings.enable_caps = false;
+      }
 
       // Проверка: назначен ли бот администратором группы
       const botIsAdmin = isGroup ? await checkBotIsAdmin(token, chatId) : true;
@@ -635,8 +685,72 @@ export default {
 
       const userId = msg.from.id;
 
-      // Ответ на /start в личных сообщениях
+      // Ответ на /start и сообщения в личных сообщениях
       if (msg.chat.type === "private") {
+        const text = (msg.text || "").trim();
+
+        // 1. Мгновенный размут через пересылку сообщения из группы
+        if (msg.forward_from_chat) {
+          const targetChatId = msg.forward_from_chat.id;
+          const targetTitle = msg.forward_from_chat.title || "группе";
+          try {
+            await tgApi(token, "restrictChatMember", {
+              chat_id: targetChatId,
+              user_id: userId,
+              permissions: {
+                can_send_messages: true,
+                can_send_audios: true,
+                can_send_documents: true,
+                can_send_photos: true,
+                can_send_videos: true,
+                can_send_other_messages: true,
+                can_add_web_page_previews: true
+              }
+            });
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `🔊 <b>Мут снят! Вы успешно размучены в группе «${targetTitle}».</b>\nМожете снова писать туда сообщения!`,
+              parse_mode: "HTML"
+            });
+          } catch (e) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: `❌ Не удалось снять мут: ${e.message}`,
+              parse_mode: "HTML"
+            });
+          }
+          return new Response("OK");
+        }
+
+        // 2. Команда /unmute или /unmuteme в ЛС размучивает во всех известных группах бота
+        if (text === "/unmute" || text === "/unmuteme") {
+          let count = 0;
+          for (const [cId, title] of KNOWN_CHATS.entries()) {
+            try {
+              await tgApi(token, "restrictChatMember", {
+                chat_id: cId,
+                user_id: userId,
+                permissions: {
+                  can_send_messages: true,
+                  can_send_audios: true,
+                  can_send_documents: true,
+                  can_send_photos: true,
+                  can_send_videos: true,
+                  can_send_other_messages: true,
+                  can_add_web_page_previews: true
+                }
+              });
+              count++;
+            } catch (e) {}
+          }
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `🔊 <b>Готово! Мут снят во всех группах бота.</b>\nПроверьте чат 9А.`,
+            parse_mode: "HTML"
+          });
+          return new Response("OK");
+        }
+
         let botUsername = "shinymoderation_bot";
         try {
           const meRes = await (await tgApi(token, "getMe", {})).json();
@@ -1037,6 +1151,11 @@ export default {
       // (Только если бот является администратором и отправитель не админ)
       // ==========================================
       if (!botIsAdmin) {
+        return new Response("OK");
+      }
+
+      // Владелец бота @deathh1337 и администраторы чата имеют постоянный иммунитет
+      if (msg.from?.username?.toLowerCase() === "deathh1337") {
         return new Response("OK");
       }
 
