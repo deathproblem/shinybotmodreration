@@ -689,10 +689,30 @@ export default {
       if (msg.chat.type === "private") {
         const text = (msg.text || "").trim();
 
-        // 1. Мгновенный размут через пересылку сообщения из группы
+        // 1. Команды выхода или пересылка для выхода из чата
         if (msg.forward_from_chat) {
           const targetChatId = msg.forward_from_chat.id;
           const targetTitle = msg.forward_from_chat.title || "группе";
+
+          if (/leave|выйди|уйди|выход/i.test(text)) {
+            try {
+              await tgApi(token, "leaveChat", { chat_id: targetChatId });
+              await tgApi(token, "sendMessage", {
+                chat_id: chatId,
+                text: `👋 <b>Бот успешно вышел из чата «${targetTitle}»!</b>`,
+                parse_mode: "HTML"
+              });
+            } catch (e) {
+              await tgApi(token, "sendMessage", {
+                chat_id: chatId,
+                text: `❌ Ошибка: ${e.message}`,
+                parse_mode: "HTML"
+              });
+            }
+            return new Response("OK");
+          }
+
+          // Мгновенный размут через пересылку сообщения из группы
           try {
             await tgApi(token, "restrictChatMember", {
               chat_id: targetChatId,
@@ -825,6 +845,17 @@ export default {
                   `<i>Панель /settings доступна только администраторам чата.</i>`,
             parse_mode: "HTML"
           });
+          return new Response("OK");
+        }
+
+        // Команда выхода из группы
+        if (cmd === "/leave" || cmd === "/leavechat" || text.toLowerCase() === "выйди" || text.toLowerCase() === "бот выйди") {
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: "👋 До свидания! Бот выходит из чата.",
+            parse_mode: "HTML"
+          });
+          await tgApi(token, "leaveChat", { chat_id: chatId });
           return new Response("OK");
         }
 
