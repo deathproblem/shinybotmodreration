@@ -1,5 +1,5 @@
 // Cloudflare Worker: Telegram Moderator Bot (ShinyModeration)
-// Ультимативный, удобный и быстрый бот-модератор для групп с интерактивным личным кабинетом в ЛС
+// Ультимативный, безопасный бот-модератор с разграничением прав доступа (Владелец vs Обычные пользователи)
 
 // Настройки по умолчанию
 const DEFAULT_SETTINGS = {
@@ -15,12 +15,26 @@ const DEFAULT_SETTINGS = {
   mute_caps_sec: 900         // 15 минут
 };
 
-// Хранилище настроек, известных чатов и ID владельцев
+// Единственные официальные владельцы бота с полным глобальным иммунитетом
+const OWNER_USERNAMES = ["fuckingmyhearts", "deathh1337"];
+
+// Хранилище настроек, известных чатов и проверенных ID владельцев
 const CHAT_SETTINGS = new Map();
 const KNOWN_CHATS = new Map();
 const OWNER_IDS = new Set();
 
-// Предзагрузка известных чатов из кэша Cloudflare Edge
+// Проверка: является ли пользователь владельцем бота
+function checkIsOwner(userId, username) {
+  if (username && OWNER_USERNAMES.includes(username.toLowerCase())) {
+    return true;
+  }
+  if (userId && OWNER_IDS.has(userId)) {
+    return true;
+  }
+  return false;
+}
+
+// Предзагрузка известных чатов и прав из кэша Cloudflare Edge
 async function loadCacheState() {
   try {
     const cache = caches.default;
@@ -38,6 +52,11 @@ async function loadCacheState() {
           CHAT_SETTINGS.set(parseInt(id, 10), s);
         }
       }
+      if (data.owners && Array.isArray(data.owners)) {
+        for (const id of data.owners) {
+          OWNER_IDS.add(id);
+        }
+      }
     }
   } catch (e) {}
 }
@@ -48,7 +67,8 @@ async function saveCacheState(ctx) {
     const req = new Request("https://shiny-storage.internal/state");
     const data = {
       chats: Object.fromEntries(KNOWN_CHATS),
-      settings: Object.fromEntries(CHAT_SETTINGS)
+      settings: Object.fromEntries(CHAT_SETTINGS),
+      owners: Array.from(OWNER_IDS)
     };
     const res = new Response(JSON.stringify(data), {
       headers: {
@@ -187,7 +207,7 @@ async function tgApi(token, method, data) {
   });
 }
 
-// Проверка: является ли пользователь админом
+// Проверка: является ли пользователь админом группы
 async function isAdmin(token, chatId, userId) {
   try {
     const res = await (await tgApi(token, "getChatMember", { chat_id: chatId, user_id: userId })).json();
@@ -207,34 +227,57 @@ async function isAdmin(token, chatId, userId) {
   return false;
 }
 
-// Главный личный кабинет в ЛС
-function renderDashboard(userId, username) {
+// Личный кабинет в ЛС с четким разделением прав (Владелец vs Обычные пользователи)
+function renderDashboard(userId, username, isOwner) {
   const botUsername = "shinymoderation_bot";
   const addUrl = `https://t.me/${botUsername}?startgroup=true&admin=delete_messages+restrict_members`;
 
-  const text =
-    `🛡️ <b>Личный кабинет ShinyModeration</b>\n\n` +
-    `👤 <b>Пользователь:</b> @${username || userId}\n` +
-    `⚡ <b>Статус:</b> Владелец / Администратор (Иммунитет активен)\n\n` +
-    `<i>Выберите нужное действие:</i>`;
+  if (isOwner) {
+    // Панель только для реального владельца (@fuckingmyhearts / @deathh1337)
+    const text =
+      `👑 <b>Панель Главного Владельца</b>\n\n` +
+      `👤 <b>Пользователь:</b> @${username || userId}\n` +
+      `⚡ <b>Статус:</b> Главный создатель бота (Полный иммунитет активен)\n\n` +
+      `<i>Вам доступен полный контроль над ботом и всеми подключенными группами:</i>`;
 
-  const reply_markup = {
-    inline_keyboard: [
-      [
-        { text: "➕ Добавить в группу (с правами)", url: addUrl }
-      ],
-      [
-        { text: "⚙️ Настройки модерации", callback_data: "act_settings_menu" },
-        { text: "🔊 Снять с меня мут", callback_data: "act_unmuteme" }
-      ],
-      [
-        { text: "🚪 Выйти из группы", callback_data: "act_leave_menu" },
-        { text: "📖 Список команд", callback_data: "act_commands_help" }
+    const reply_markup = {
+      inline_keyboard: [
+        [
+          { text: "➕ Добавить в группу (с правами)", url: addUrl }
+        ],
+        [
+          { text: "⚙️ Настройки модерации", callback_data: "act_settings_menu" },
+          { text: "🔊 Снять с меня мут", callback_data: "act_unmuteme" }
+        ],
+        [
+          { text: "🚪 Выйти из группы", callback_data: "act_leave_menu" },
+          { text: "📖 Список команд", callback_data: "act_commands_help" }
+        ]
       ]
-    ]
-  };
+    };
+    return { text, reply_markup };
+  } else {
+    // Панель для ВСЕХ остальных пользователей (без иммунитета и без прав управления)
+    const text =
+      `🛡️ <b>ShinyModeration — Бот-модератор для групп</b>\n\n` +
+      `👤 <b>Пользователь:</b> @${username || userId}\n` +
+      `🔰 <b>Статус:</b> Пользователь (Иммунитета нет)\n\n` +
+      `Я защищаю группы Telegram от спама, скама, рекламы и нарушителей 24/7.\n\n` +
+      `<b>Хотите подключить бота в свою группу?</b>\n` +
+      `Нажмите кнопку ниже и назначьте бота Администратором.`;
 
-  return { text, reply_markup };
+    const reply_markup = {
+      inline_keyboard: [
+        [
+          { text: "➕ Добавить бота в группу", url: addUrl }
+        ],
+        [
+          { text: "📖 Список команд и правил", callback_data: "act_commands_help" }
+        ]
+      ]
+    };
+    return { text, reply_markup };
+  }
 }
 
 // Панель настроек модерации для конкретного чата (используется и в группе, и в ЛС)
@@ -319,14 +362,26 @@ async function handleCallbackQuery(token, env, ctx, cq) {
   const chatId = cq.message?.chat?.id;
   const userId = cq.from?.id;
   const username = cq.from?.username ? cq.from.username.toLowerCase() : "";
-  const isOwner = username === "deathh1337" || username === "fuckingmyhearts" || OWNER_IDS.has(userId);
+  const isOwner = checkIsOwner(userId, username);
+  if (isOwner && userId) {
+    OWNER_IDS.add(userId);
+  }
   const messageId = cq.message?.message_id;
   const data = cq.data || "";
 
   if (!chatId || !userId) return new Response("OK");
 
-  // 1. Снять с меня мут
+  // 1. Снять с меня мут (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА)
   if (data === "act_unmuteme") {
+    if (!isOwner) {
+      await tgApi(token, "answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "❌ Функция саморазмута доступна только создателю бота!",
+        show_alert: true
+      });
+      return new Response("OK");
+    }
+
     let unmutedCount = 0;
     for (const [cId, title] of KNOWN_CHATS.entries()) {
       try {
@@ -349,7 +404,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
 
     const alertMsg = unmutedCount > 0
       ? `🔊 Мут снят в ${unmutedCount} группах! Вы можете писать сообщения.`
-      : "🔊 Мут снят! Если вы ограничены в группе, перешлите любое сообщение из неё боту.";
+      : "🔊 Мут снят!";
 
     await tgApi(token, "answerCallbackQuery", {
       callback_query_id: cq.id,
@@ -358,11 +413,11 @@ async function handleCallbackQuery(token, env, ctx, cq) {
     });
 
     if (cq.message?.chat?.type === "private") {
-      const dash = renderDashboard(userId, cq.from?.username);
+      const dash = renderDashboard(userId, cq.from?.username, isOwner);
       await tgApi(token, "editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: `🔊 <b>Мут успешно снят!</b>\nВсе ограничения на отправку сообщений и медиа сняты.\n\n` + dash.text,
+        text: `🔊 <b>Мут успешно снят!</b>\nВсе ограничения сняты.\n\n` + dash.text,
         parse_mode: "HTML",
         reply_markup: dash.reply_markup
       });
@@ -370,8 +425,17 @@ async function handleCallbackQuery(token, env, ctx, cq) {
     return new Response("OK");
   }
 
-  // 2. Меню "Выйти из группы"
+  // 2. Меню "Выйти из группы" (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА)
   if (data === "act_leave_menu") {
+    if (!isOwner) {
+      await tgApi(token, "answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "❌ Управление выходом доступно только владельцу бота!",
+        show_alert: true
+      });
+      return new Response("OK");
+    }
+
     if (KNOWN_CHATS.size > 0) {
       const buttons = [];
       for (const [cId, title] of KNOWN_CHATS.entries()) {
@@ -394,7 +458,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
         message_id: messageId,
         text:
           "🚪 <b>Как попросить бота выйти из группы:</b>\n\n" +
-          "1️⃣ <b>Самый простой способ:</b> Напишите в самом чате (например, «9А») слово: <code>выйди</code> — бот сразу выйдет!\n\n" +
+          "1️⃣ <b>Самый простой способ:</b> Напишите в самом чате (например, в «9А») слово: <code>выйди</code> — бот сразу выйдет!\n\n" +
           "2️⃣ <b>Либо перешлите сюда</b> любое сообщение из этой группы — появится кнопка выхода в один клик.",
         parse_mode: "HTML",
         reply_markup: {
@@ -406,10 +470,18 @@ async function handleCallbackQuery(token, env, ctx, cq) {
     return new Response("OK");
   }
 
-  // 3. Меню "Настройки модерации" в ЛС
+  // 3. Меню "Настройки модерации" в ЛС (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА)
   if (data === "act_settings_menu") {
+    if (!isOwner) {
+      await tgApi(token, "answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "❌ Настройки групп доступны только владельцу бота!",
+        show_alert: true
+      });
+      return new Response("OK");
+    }
+
     if (KNOWN_CHATS.size === 1) {
-      // Если чат один, сразу открываем его настройки
       const [onlyChatId, onlyTitle] = Array.from(KNOWN_CHATS.entries())[0];
       const settings = await getChatSettings(env, onlyChatId);
       const payload = renderChatSettingsPanel(onlyChatId, onlyTitle, settings, true);
@@ -458,8 +530,12 @@ async function handleCallbackQuery(token, env, ctx, cq) {
     return new Response("OK");
   }
 
-  // 4. Открытие настроек конкретного чата из ЛС
+  // 4. Открытие настроек конкретного чата из ЛС (ТОЛЬКО ВЛАДЕЛЕЦ)
   if (data.startsWith("pm_cfg_chat_")) {
+    if (!isOwner) {
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "❌ Доступ запрещен!", show_alert: true });
+      return new Response("OK");
+    }
     const targetChatId = parseInt(data.replace("pm_cfg_chat_", ""), 10);
     const title = KNOWN_CHATS.get(targetChatId) || `Чат ${targetChatId}`;
     const settings = await getChatSettings(env, targetChatId);
@@ -475,8 +551,12 @@ async function handleCallbackQuery(token, env, ctx, cq) {
     return new Response("OK");
   }
 
-  // 5. Обработка переключателей настроек из ЛС (pm_cfg_<chatId>_<action>)
+  // 5. Обработка переключателей настроек из ЛС (pm_cfg_<chatId>_<action>) (ТОЛЬКО ВЛАДЕЛЕЦ)
   if (data.startsWith("pm_cfg_")) {
+    if (!isOwner) {
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "❌ Доступ запрещен!", show_alert: true });
+      return new Response("OK");
+    }
     const parts = data.replace("pm_cfg_", "").split("_");
     const targetChatId = parseInt(parts[0], 10);
     const action = parts.slice(1).join("_");
@@ -535,6 +615,16 @@ async function handleCallbackQuery(token, env, ctx, cq) {
   // 6. Выход из группы по кнопке
   if (data.startsWith("leave_chat_")) {
     const targetChatId = data.replace("leave_chat_", "");
+    const canLeave = isOwner || await isAdmin(token, targetChatId, userId);
+    if (!canLeave) {
+      await tgApi(token, "answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "❌ У вас нет прав на управление этой группой!",
+        show_alert: true
+      });
+      return new Response("OK");
+    }
+
     try {
       const res = await tgApi(token, "leaveChat", { chat_id: targetChatId });
       const resData = await res.json();
@@ -563,6 +653,15 @@ async function handleCallbackQuery(token, env, ctx, cq) {
   // 7. Размут в конкретном чате по кнопке
   if (data.startsWith("unmute_chat_")) {
     const targetChatId = data.replace("unmute_chat_", "");
+    if (!isOwner && !await isAdmin(token, targetChatId, userId)) {
+      await tgApi(token, "answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "❌ Снять мут может только владелец бота или администратор группы!",
+        show_alert: true
+      });
+      return new Response("OK");
+    }
+
     try {
       await tgApi(token, "restrictChatMember", {
         chat_id: targetChatId,
@@ -595,7 +694,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
 
   // 8. Возврат в кабинет
   if (data === "act_back_dashboard") {
-    const dash = renderDashboard(userId, cq.from?.username);
+    const dash = renderDashboard(userId, cq.from?.username, isOwner);
     await tgApi(token, "editMessageText", {
       chat_id: chatId,
       message_id: messageId,
@@ -880,16 +979,11 @@ export default {
 
       const userId = msg.from.id;
       const username = msg.from.username ? msg.from.username.toLowerCase() : "";
-      const firstName = (msg.from.first_name || "").toLowerCase();
 
-      // Определение владельца
-      const isOwner =
-        username === "deathh1337" ||
-        username === "fuckingmyhearts" ||
-        firstName.includes("death.dll") ||
-        OWNER_IDS.has(userId);
+      // Строгое определение владельца: ТОЛЬКО @fuckingmyhearts и @deathh1337
+      const isOwner = checkIsOwner(userId, username);
 
-      if (isOwner) {
+      if (isOwner && userId) {
         OWNER_IDS.add(userId);
       }
 
@@ -900,8 +994,17 @@ export default {
         const text = (msg.text || "").trim();
         const lower = text.toLowerCase();
 
-        // 1. Пересылка сообщения из любой группы: мгновенная привязка и кнопки управления
+        // 1. Пересылка сообщения из любой группы (доступна только владельцу)
         if (msg.forward_from_chat) {
+          if (!isOwner) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "⚠️ Управление ботом через пересылку сообщений доступно только владельцу бота.",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
           const targetChatId = msg.forward_from_chat.id;
           const targetTitle = msg.forward_from_chat.title || "этой группе";
           KNOWN_CHATS.set(targetChatId, targetTitle);
@@ -932,9 +1035,17 @@ export default {
           return new Response("OK");
         }
 
-        // 2. Обработка текстовых команд на выход из группы в ЛС
+        // 2. Обработка текстовых команд на выход из группы в ЛС (только владелец)
         if (lower.includes("выйди") || lower.includes("выйти") || lower.includes("leave") || lower.includes("ливай")) {
-          // Ищем группу, если пользователь упомянул название (например, 9А)
+          if (!isOwner) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "❌ Выход из групп через личные сообщения доступен только владельцу бота.",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
           let matchedChatId = null;
           let matchedTitle = null;
 
@@ -969,7 +1080,6 @@ export default {
             return new Response("OK");
           }
 
-          // Если группа не указана явно или не найдена в памяти:
           if (KNOWN_CHATS.size > 0) {
             const buttons = [];
             for (const [cId, title] of KNOWN_CHATS.entries()) {
@@ -1000,8 +1110,17 @@ export default {
           }
         }
 
-        // 3. Обработка текстового размута в ЛС
+        // 3. Обработка текстового размута в ЛС (только владелец)
         if (lower.includes("размут") || lower.includes("сними мут") || lower.includes("unmute")) {
+          if (!isOwner) {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "❌ Саморазмут через ЛС доступен только владельцу бота. Обратитесь к администраторам группы.",
+              parse_mode: "HTML"
+            });
+            return new Response("OK");
+          }
+
           let count = 0;
           for (const [cId, title] of KNOWN_CHATS.entries()) {
             try {
@@ -1032,8 +1151,8 @@ export default {
           return new Response("OK");
         }
 
-        // 4. Показ личного кабинета
-        const dash = renderDashboard(userId, msg.from.username);
+        // 4. Показ личного кабинета (адаптирован под статус: Владелец vs Обычный пользователь)
+        const dash = renderDashboard(userId, msg.from.username, isOwner);
         await tgApi(token, "sendMessage", {
           chat_id: chatId,
           text: dash.text,
@@ -1265,16 +1384,18 @@ export default {
       // ==========================================
       // АВТО-МОДЕРАЦИЯ СООБЩЕНИЙ УЧАСТНИКОВ
       // ==========================================
-      // Владельцы (@deathh1337, @fuckingmyhearts) имеют постоянный иммунитет
+      // 1. ТОЛЬКО Владельцы (@fuckingmyhearts, @deathh1337) имеют ПОСТОЯННЫЙ ГЛОБАЛЬНЫЙ ИММУНИТЕТ
       if (isOwner) {
         return new Response("OK");
       }
 
+      // 2. Администраторы конкретной группы имеют локальный иммунитет в своем чате
       const senderIsAdmin = await isAdmin(token, chatId, userId);
       if (senderIsAdmin) {
         return new Response("OK");
       }
 
+      // 3. У обычных участников группы ИММУНИТЕТА НЕТ! Все сообщения проверяются:
       const mention = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
 
       // 1. Проверка на спам/скам/рекламу -> БАН НАВСЕГДА
