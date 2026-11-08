@@ -421,23 +421,73 @@ async function handleCallbackQuery(token, env, cq) {
     return new Response("OK");
   }
 
-  // Только администраторы могут управлять настройками
+  // Обработка выхода из чата по кнопке в ЛС
+  if (data.startsWith("leave_chat_")) {
+    const targetChatId = data.replace("leave_chat_", "");
+    try {
+      const res = await tgApi(token, "leaveChat", { chat_id: targetChatId });
+      const resData = await res.json();
+      if (resData.ok) {
+        KNOWN_CHATS.delete(parseInt(targetChatId, 10));
+        await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "✅ Бот покинул чат!" });
+        await tgApi(token, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: `🚪 <b>Бот успешно покинул выбранный чат (ID: <code>${targetChatId}</code>)!</b>`,
+          parse_mode: "HTML"
+        });
+      } else {
+        await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: `Ошибка: ${resData.description}`, show_alert: true });
+      }
+    } catch (e) {
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: `Ошибка: ${e.message}`, show_alert: true });
+    }
+    return new Response("OK");
+  }
+
+  // Обработка снятия мута по кнопке в ЛС
+  if (data.startsWith("unmute_chat_")) {
+    const targetChatId = data.replace("unmute_chat_", "");
+    try {
+      await tgApi(token, "restrictChatMember", {
+        chat_id: targetChatId,
+        user_id: userId,
+        permissions: {
+          can_send_messages: true,
+          can_send_audios: true,
+          can_send_documents: true,
+          can_send_photos: true,
+          can_send_videos: true,
+          can_send_other_messages: true,
+          can_add_web_page_previews: true
+        }
+      });
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "🔊 Мут снят!" });
+      await tgApi(token, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `🔊 <b>Мут успешно снят в группе (ID: <code>${targetChatId}</code>)!</b>\nВы снова можете отправлять туда сообщения.`,
+        parse_mode: "HTML"
+      });
+    } catch (e) {
+      await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: `Ошибка: ${e.message}`, show_alert: true });
+    }
+    return new Response("OK");
+  }
+
+  if (data === "cfg_close") {
+    await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: messageId });
+    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Панель закрыта" });
+    return new Response("OK");
+  }
+
+  // Только администраторы могут управлять настройками группы
   if (!await isAdmin(token, chatId, userId)) {
     await tgApi(token, "answerCallbackQuery", {
       callback_query_id: cq.id,
       text: "❌ Только администраторы могут менять настройки модерации!",
       show_alert: true
     });
-    return new Response("OK");
-  }
-
-  const settings = await getChatSettings(env, chatId);
-  let changed = false;
-  let subMenu = null;
-
-  if (data === "cfg_close") {
-    await tgApi(token, "deleteMessage", { chat_id: chatId, message_id: messageId });
-    await tgApi(token, "answerCallbackQuery", { callback_query_id: cq.id, text: "Панель настроек закрыта" });
     return new Response("OK");
   }
 
@@ -689,56 +739,52 @@ export default {
       if (msg.chat.type === "private") {
         const text = (msg.text || "").trim();
 
-        // 1. Команды выхода или пересылка для выхода из чата
+        // 1. Команда /leave или /chats в ЛС: показывает список групп бота с кнопками выхода!
+        if (text === "/leave" || text === "/chats" || text === "/groups") {
+          if (KNOWN_CHATS.size > 0) {
+            const buttons = [];
+            for (const [cId, title] of KNOWN_CHATS.entries()) {
+              buttons.push([{ text: `🚪 Выйти из «${title}»`, callback_data: `leave_chat_${cId}` }]);
+            }
+            buttons.push([{ text: "❌ Отмена", callback_data: "cfg_close" }]);
+
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "🚪 <b>Выберите группу, из которой боту нужно выйти:</b>",
+              parse_mode: "HTML",
+              reply_markup: { inline_keyboard: buttons }
+            });
+          } else {
+            await tgApi(token, "sendMessage", {
+              chat_id: chatId,
+              text: "🚪 <b>Управление выходом из групп:</b>\n\n" +
+                    "Чтобы бот отобразил кнопку выхода из чата «9А»:\n" +
+                    "👉 <b>Перешлите сюда любое сообщение из чата 9А</b> (от любого участника или от бота).\n\n" +
+                    "<i>Бот мгновенно покажет интерактивную кнопку: [ 🚪 Выйти из 9А ]!</i>",
+              parse_mode: "HTML"
+            });
+          }
+          return new Response("OK");
+        }
+
+        // 2. Пересылка сообщения из любой группы: мгновенно дает кнопки выхода и размута
         if (msg.forward_from_chat) {
           const targetChatId = msg.forward_from_chat.id;
-          const targetTitle = msg.forward_from_chat.title || "группе";
+          const targetTitle = msg.forward_from_chat.title || "этой группе";
+          KNOWN_CHATS.set(targetChatId, targetTitle);
 
-          if (/leave|выйди|уйди|выход/i.test(text)) {
-            try {
-              await tgApi(token, "leaveChat", { chat_id: targetChatId });
-              await tgApi(token, "sendMessage", {
-                chat_id: chatId,
-                text: `👋 <b>Бот успешно вышел из чата «${targetTitle}»!</b>`,
-                parse_mode: "HTML"
-              });
-            } catch (e) {
-              await tgApi(token, "sendMessage", {
-                chat_id: chatId,
-                text: `❌ Ошибка: ${e.message}`,
-                parse_mode: "HTML"
-              });
+          await tgApi(token, "sendMessage", {
+            chat_id: chatId,
+            text: `📍 <b>Обнаружен чат: «${targetTitle}»</b>\nID: <code>${targetChatId}</code>\n\nВыберите действие:`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: `🚪 Выйти из «${targetTitle}»`, callback_data: `leave_chat_${targetChatId}` }],
+                [{ text: `🔊 Снять с меня мут в «${targetTitle}»`, callback_data: `unmute_chat_${targetChatId}` }],
+                [{ text: "❌ Отмена", callback_data: "cfg_close" }]
+              ]
             }
-            return new Response("OK");
-          }
-
-          // Мгновенный размут через пересылку сообщения из группы
-          try {
-            await tgApi(token, "restrictChatMember", {
-              chat_id: targetChatId,
-              user_id: userId,
-              permissions: {
-                can_send_messages: true,
-                can_send_audios: true,
-                can_send_documents: true,
-                can_send_photos: true,
-                can_send_videos: true,
-                can_send_other_messages: true,
-                can_add_web_page_previews: true
-              }
-            });
-            await tgApi(token, "sendMessage", {
-              chat_id: chatId,
-              text: `🔊 <b>Мут снят! Вы успешно размучены в группе «${targetTitle}».</b>\nМожете снова писать туда сообщения!`,
-              parse_mode: "HTML"
-            });
-          } catch (e) {
-            await tgApi(token, "sendMessage", {
-              chat_id: chatId,
-              text: `❌ Не удалось снять мут: ${e.message}`,
-              parse_mode: "HTML"
-            });
-          }
+          });
           return new Response("OK");
         }
 
