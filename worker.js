@@ -831,7 +831,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const token = env?.BOT_TOKEN || "8227600059:AAHnhYBRiCmhCPf7aJ5ac3dvvm2ElykwHgU";
+    const token = env?.BOT_TOKEN || "8227600059:AAE53m-CWOzAyZ3XGc5cK1V8Zkzg08JAUOQ";
 
     // Инициализация кэша
     await loadCacheState();
