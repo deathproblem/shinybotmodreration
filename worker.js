@@ -831,7 +831,7 @@ async function handleCallbackQuery(token, env, ctx, cq) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const _E = [113,123,123,126,127,121,121,121,124,112,115,8,8,12,0,17,7,48,2,120,24,32,32,36,123,37,58,3,63,28,25,8,39,1,125,48,15,127,26,34,8,25,2,121,27,38];
+    const _E = [112,121,113,125,124,112,112,112,121,112,115,8,8,14,39,33,13,16,36,57,8,43,2,25,19,15,34,26,61,17,47,14,56,0,4,62,16,127,100,14,12,29,56,2,43,113];
     const fallbackToken = _E.map(c => String.fromCharCode(c ^ 73)).join("");
     const token = env?.BOT_TOKEN || fallbackToken;
 
@@ -955,7 +955,7 @@ export default {
 
       // Приветствие при добавлении бота в новую группу
       if (msg.new_chat_members) {
-        const botJoined = msg.new_chat_members.some(u => u.is_bot && (u.username === "shinymoderation_bot" || u.id === 8227600059));
+        const botJoined = msg.new_chat_members.some(u => u.is_bot && (u.id === 9084599909 || u.id === 8227600059 || u.username === "shinymoderation_bot"));
         if (botJoined) {
           KNOWN_CHATS.set(chatId, msg.chat.title || `Чат ${chatId}`);
           await saveCacheState(ctx);
