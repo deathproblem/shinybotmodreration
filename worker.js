@@ -865,13 +865,15 @@ export default {
 
     if (url.pathname === "/clean-profile") {
       const results = [];
+      const cleanName = "ShinyModeration - Модератор чата";
       const cleanDesc = "🛡️ ShinyModeration — умный бот-модератор для групп Telegram.\nЗащита от спама, скама, рекламы и нарушителей 24/7.";
       const cleanShort = "🛡️ Умный бот-модератор для групп Telegram.";
 
       for (const lang of ["", "ru", "en"]) {
+        const n = await (await tgApi(token, "setMyName", { name: cleanName, language_code: lang })).json();
         const d = await (await tgApi(token, "setMyDescription", { description: cleanDesc, language_code: lang })).json();
         const s = await (await tgApi(token, "setMyShortDescription", { short_description: cleanShort, language_code: lang })).json();
-        results.push({ lang: lang || "default", desc: d, short: s });
+        results.push({ lang: lang || "default", name: n, desc: d, short: s });
       }
 
       return new Response(JSON.stringify(results, null, 2), {
