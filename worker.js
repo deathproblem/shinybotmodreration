@@ -831,8 +831,10 @@ async function handleCallbackQuery(token, env, ctx, cq) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const NEW_TOKEN = "8227600059:AAE53m-CWOzAyZ3XGc5cK1V8Zkzg08JAUOQ";
-    const token = (env?.BOT_TOKEN && env.BOT_TOKEN.startsWith("8227600059:AAE53m")) ? env.BOT_TOKEN : NEW_TOKEN;
+    const token = env?.BOT_TOKEN;
+    if (!token) {
+      return new Response("BOT_TOKEN is not configured in Cloudflare environment secrets", { status: 500 });
+    }
 
     // Инициализация кэша
     await loadCacheState();
