@@ -877,6 +877,16 @@ export default {
       });
     }
 
+    if (url.pathname === "/check-bot") {
+      const me = await (await tgApi(token, "getMe", {})).json();
+      const desc = await (await tgApi(token, "getMyDescription", {})).json();
+      const shortDesc = await (await tgApi(token, "getMyShortDescription", {})).json();
+      const webhook = await (await tgApi(token, "getWebhookInfo", {})).json();
+      return new Response(JSON.stringify({ me, desc, shortDesc, webhook }, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/debug-chats") {
       return new Response(JSON.stringify({
         known_chats: Object.fromEntries(KNOWN_CHATS),
