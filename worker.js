@@ -862,6 +862,20 @@ export default {
       });
     }
 
+    if (url.pathname === "/clean-profile") {
+      const descRes = await (await tgApi(token, "setMyDescription", {
+        description: "🛡️ ShinyModeration — умный бот-модератор для групп Telegram.\nЗащита от спама, скама, рекламы и нарушителей 24/7."
+      })).json();
+
+      const shortRes = await (await tgApi(token, "setMyShortDescription", {
+        short_description: "🛡️ Умный бот-модератор для групп Telegram."
+      })).json();
+
+      return new Response(JSON.stringify({ descRes, shortRes }, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/debug-chats") {
       return new Response(JSON.stringify({
         known_chats: Object.fromEntries(KNOWN_CHATS),
