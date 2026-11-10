@@ -864,25 +864,29 @@ export default {
     }
 
     if (url.pathname === "/clean-profile") {
-      const descRes = await (await tgApi(token, "setMyDescription", {
-        description: "🛡️ ShinyModeration — умный бот-модератор для групп Telegram.\nЗащита от спама, скама, рекламы и нарушителей 24/7."
-      })).json();
+      const results = [];
+      const cleanDesc = "🛡️ ShinyModeration — умный бот-модератор для групп Telegram.\nЗащита от спама, скама, рекламы и нарушителей 24/7.";
+      const cleanShort = "🛡️ Умный бот-модератор для групп Telegram.";
 
-      const shortRes = await (await tgApi(token, "setMyShortDescription", {
-        short_description: "🛡️ Умный бот-модератор для групп Telegram."
-      })).json();
+      for (const lang of ["", "ru", "en"]) {
+        const d = await (await tgApi(token, "setMyDescription", { description: cleanDesc, language_code: lang })).json();
+        const s = await (await tgApi(token, "setMyShortDescription", { short_description: cleanShort, language_code: lang })).json();
+        results.push({ lang: lang || "default", desc: d, short: s });
+      }
 
-      return new Response(JSON.stringify({ descRes, shortRes }, null, 2), {
+      return new Response(JSON.stringify(results, null, 2), {
         headers: { "Content-Type": "application/json" }
       });
     }
 
     if (url.pathname === "/check-bot") {
       const me = await (await tgApi(token, "getMe", {})).json();
-      const desc = await (await tgApi(token, "getMyDescription", {})).json();
-      const shortDesc = await (await tgApi(token, "getMyShortDescription", {})).json();
+      const descDefault = await (await tgApi(token, "getMyDescription", {})).json();
+      const descRu = await (await tgApi(token, "getMyDescription", { language_code: "ru" })).json();
+      const shortDefault = await (await tgApi(token, "getMyShortDescription", {})).json();
+      const shortRu = await (await tgApi(token, "getMyShortDescription", { language_code: "ru" })).json();
       const webhook = await (await tgApi(token, "getWebhookInfo", {})).json();
-      return new Response(JSON.stringify({ me, desc, shortDesc, webhook }, null, 2), {
+      return new Response(JSON.stringify({ me, descDefault, descRu, shortDefault, shortRu, webhook }, null, 2), {
         headers: { "Content-Type": "application/json" }
       });
     }
